@@ -666,6 +666,43 @@ local function IsApplicantPresent(applicantID)
   return false
 end
 
+-- Session continuity across reloads: the runtime counter restarts at 1 while
+-- persisted log rows keep the old number, which made every existing applicant
+-- look "new" again on login (re-alert storm + duplicate rows + ID actions
+-- refused). When a listing is (still) active, ADOPT the persisted session
+-- number of the entries after the last separator instead of incrementing.
+local function AdoptOrIncrementSession()
+  local log = DB().log or {}
+  local lastSep = 0
+  for i, e in ipairs(log) do
+    if e.separator then lastSep = i end
+  end
+  local maxS = 0
+  for i = lastSep + 1, #log do
+    local e = log[i]
+    if e and not e.separator and type(e.session) == "number" and e.session > maxS then
+      maxS = e.session
+    end
+  end
+  if maxS > 0 then
+    listingSession = maxS
+  else
+    listingSession = listingSession + 1
+  end
+end
+
+-- Pre-seed known[] from the log so applicants that queued BEFORE a reload are
+-- never re-alerted as new (no sound, no toast, no auto-open Group Finder).
+local function PrimeKnownFromLog()
+  for _, e in ipairs(DB().log or {}) do
+    if not e.separator and e.applicantID and e.applicantID ~= 0
+      and e.session == listingSession and not TERMINAL_STATUSES[e.status]
+      and known[e.applicantID] == nil then
+      known[e.applicantID] = { status = e.status, snap = nil }
+    end
+  end
+end
+
 local function HandleApplicantGone(applicantID)
   local prev = known[applicantID]
   if not prev or not prev.status or TERMINAL_STATUSES[prev.status] then return end
@@ -708,6 +745,15 @@ local function ScanApplicants(reason, retryN)
   if not HasActiveListing() then return end
   if not IsGroupLeader() then return end
   if not C_LFGList.GetApplicants then return end
+
+  -- A listing can be active before its event reaches us (login timing):
+  -- settle the session first, then prime known[] so the login scan does not
+  -- re-alert everyone who queued before the reload.
+  if not hadListing then
+    AdoptOrIncrementSession()
+    hadListing = true
+  end
+  if reason == "login" then PrimeKnownFromLog() end
 
   local ok, ids = pcall(C_LFGList.GetApplicants)
   if not ok or type(ids) ~= "table" then return end
@@ -929,7 +975,9 @@ local M = {
       end
     elseif event == "LFG_LIST_ACTIVE_ENTRY_UPDATE" then
       if HasActiveListing() then
-        if not hadListing then listingSession = listingSession + 1 end
+        if not hadListing then
+          AdoptOrIncrementSession()
+        end
         hadListing = true
         A.Rescan("entry")
       else
