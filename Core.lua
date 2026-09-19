@@ -10,7 +10,7 @@ LFGSuite = LFGSuite or {}
 local NS = LFGSuite
 local L = NS.L or {} -- from Locales\enUS.lua (loaded first per .toc)
 local function l(key, fallback) return L[key] or fallback end
-NS.BUILD = 4 -- bump every shipment; shown in load message + window titles
+NS.BUILD = 5 -- bump every shipment; shown in load message + window titles
 
 -- ---------------------------------------------------------------------------
 -- Defaults / DB

@@ -150,9 +150,11 @@ local function PushFramesFromScrollBox(sb, out)
   end
   if #out > before then return #out - before end
   if type(sb.EnumerateFrames) == "function" then
-    local ok, iter = pcall(sb.EnumerateFrames, sb)
+    -- Forward the full iterator triple: pcall swallows the extra returns,
+    -- and a bare `for f in iter` passes nil state -> "bad argument #2".
+    local ok, iter, state, control = pcall(sb.EnumerateFrames, sb)
     if ok and type(iter) == "function" then
-      for f in iter do out[#out + 1] = f end
+      for f in iter, state, control do out[#out + 1] = f end
     end
   end
   if #out > before then return #out - before end
@@ -305,7 +307,10 @@ local function ScheduleDecorate()
   decoratePending = true
   C_Timer.After(0.15, function()
     decoratePending = false
-    DecorateRows()
+    -- The bus pcall only covers OnEvent (which merely schedules); guard the
+    -- deferred pass too so a row-probing bug degrades quietly.
+    local ok, err = pcall(DecorateRows)
+    if not ok and NS.ModuleError then NS.ModuleError({ key = "browser" }, err) end
   end)
 end
 
