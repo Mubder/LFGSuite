@@ -11,6 +11,8 @@
 --   [x] Role memory: captured from every signup via ApplyToGroup hook
 --       (works for our double-click AND Blizzard's own signup dialog)
 --   [x] Refresh: /lfgs refresh + keybind (Bindings.xml)
+--   [x] Resilience: ScrollBox/row-field probes across client generations,
+--       per-row pcall guards, /lfgs browse diagnostics
 --   [ ] Sort listings by age (deferred: ScrollBox reordering is fragile)
 --   [ ] Region tags (Premade Regions) - phase 2
 --   [ ] Filter panel + expression language - phase 2
@@ -48,10 +50,36 @@ end
 -- Leader overall M+ score, defending against field renames across patches.
 local function GetLeaderScore(info)
   if type(info) ~= "table" then return nil end
-  local s = info.leaderOverallDungeonScore
-  if type(s) == "number" and s > 0 then return s end
+  local function num(v)
+    if type(v) == "number" and v > 0 then return math.floor(v) end
+    return nil
+  end
+  local hit = num(info.leaderOverallDungeonScore)
+    or num(info.leaderScore)
+    or num(info.leaderMythicPlusScore)
+  if hit then return hit end
   local d = info.leaderDungeonScore
-  if type(d) == "table" and type(d.score) == "number" and d.score > 0 then return d.score end
+  if type(d) == "table" then hit = num(d.score) end
+  if hit then return hit end
+  -- Some clients nest leader data one level down.
+  local li = info.leaderInfo
+  if type(li) == "table" then
+    hit = num(li.overallDungeonScore) or num(li.dungeonScore) or num(li.score)
+    if hit then return hit end
+  end
+  return nil
+end
+
+-- Listing age in seconds: field name moved across patches, and some clients
+-- only expose a creation timestamp.
+local function GetListingAge(info)
+  if type(info) ~= "table" then return nil end
+  if type(info.age) == "number" and info.age >= 0 then return info.age end
+  if type(info.listingAge) == "number" and info.listingAge >= 0 then return info.listingAge end
+  if type(info.creationTime) == "number" and info.creationTime > 0 then
+    local age = time() - info.creationTime
+    if age >= 0 then return age end
+  end
   return nil
 end
 
@@ -60,9 +88,12 @@ local function RowTag(info)
   if db.tags == false then return nil end
   local parts = {}
   -- Deference: Premade Sort already draws listing age.
-  if not IsAddonLoaded("Premade Sort") and type(info.age) == "number" then
-    local age = Util.FormatAge(info.age)
-    if age then parts[#parts + 1] = "|cffa0a0a0" .. age .. "|r" end
+  if not (IsAddonLoaded("Premade Sort") or IsAddonLoaded("PremadeSort")) then
+    local age = GetListingAge(info)
+    if age then
+      local ageTxt = Util.FormatAge(age)
+      if ageTxt then parts[#parts + 1] = "|cffa0a0a0" .. ageTxt .. "|r" end
+    end
   end
   local title = Util.CleanKString((info.name or "") .. " " .. (info.comment or ""))
   local keyLevel = Util.ParseKeyLevel(title)
@@ -77,21 +108,109 @@ end
 -- Row decoration
 -- ---------------------------------------------------------------------------
 
+-- Debug state surfaced by /lfgs browse (see bottom of file).
+NS._browserDebug = NS._browserDebug or {
+  lastEvent = nil, strategy = nil, frames = 0, withID = 0, tagged = 0, errors = 0,
+}
+
+-- Result ID, defending against Blizzard renames: the row button held
+-- .resultID for years, but newer ScrollBox rows may expose it under a
+-- different key or via GetData().
+local function GetResultID(b)
+  if type(b) ~= "table" then return nil end
+  for _, k in ipairs({ "resultID", "listingID", "searchResultID" }) do
+    local v = b[k]
+    if type(v) == "number" and v > 0 then return v end
+  end
+  if type(b.GetResultID) == "function" then
+    local ok, v = pcall(b.GetResultID, b)
+    if ok and type(v) == "number" and v > 0 then return v end
+  end
+  if type(b.GetData) == "function" then
+    local ok, d = pcall(b.GetData, b)
+    if ok and type(d) == "table" then
+      for _, k in ipairs({ "resultID", "listingID", "searchResultID", "id", "ID" }) do
+        local v = d[k]
+        if type(v) == "number" and v > 0 then return v end
+      end
+    end
+  end
+  return nil
+end
+
+local function PushFramesFromScrollBox(sb, out)
+  if type(sb) ~= "table" then return 0 end
+  local before = #out
+  -- New ScrollBox API.
+  if type(sb.GetFrames) == "function" then
+    local ok, frames = pcall(sb.GetFrames, sb)
+    if ok and type(frames) == "table" then
+      for _, f in ipairs(frames) do out[#out + 1] = f end
+    end
+  end
+  if #out > before then return #out - before end
+  if type(sb.EnumerateFrames) == "function" then
+    local ok, iter = pcall(sb.EnumerateFrames, sb)
+    if ok and type(iter) == "function" then
+      for f in iter do out[#out + 1] = f end
+    end
+  end
+  if #out > before then return #out - before end
+  -- Last resort: raw children that look like rows.
+  if type(sb.GetChildren) == "function" then
+    local ok, a, b, c, d, e = pcall(sb.GetChildren, sb)
+    if ok then
+      for _, child in ipairs({ a, b, c, d, e }) do
+        if type(child) == "table" and type(child.HookScript) == "function"
+          and (GetResultID(child) or type(child.GetData) == "function") then
+          out[#out + 1] = child
+        end
+      end
+    end
+  end
+  return #out - before
+end
+
+local function FindScrollBox()
+  local panel = LFGListFrame and LFGListFrame.SearchPanel
+  if type(panel) ~= "table" then
+    if GroupFinderFrame and GroupFinderFrame.SearchPanel then
+      panel = GroupFinderFrame.SearchPanel
+    end
+  end
+  if type(panel) ~= "table" then return nil, nil end
+  return panel.ScrollBox or panel.scrollBox or panel.Scrollbox, panel
+end
+
 local function CollectSearchButtons(out)
-  -- Strategy A: modern ScrollBox frames.
-  local okA, frames = pcall(function()
-    local sb = LFGListFrame.SearchPanel.ScrollBox
-    return sb:GetFrames()
-  end)
-  if okA and type(frames) == "table" then
-    for _, f in ipairs(frames) do out[#out + 1] = f end
-    if #out > 0 then return end
+  local dbg = NS._browserDebug
+  -- Strategy A: modern ScrollBox frames (both casings / both parents).
+  local sb = FindScrollBox()
+  if sb then
+    local n = PushFramesFromScrollBox(sb, out)
+    if n > 0 then dbg.strategy = "scrollbox" return end
   end
   -- Strategy B: legacy globally-named entry buttons.
-  for i = 1, 24 do
+  for i = 1, 40 do
     local b = _G["LFGListSearchEntry" .. i]
     if b then out[#out + 1] = b end
   end
+  if #out > 0 then dbg.strategy = "legacy" return end
+  -- Strategy C: any child of the search panel that looks like a row.
+  local _, panel = FindScrollBox()
+  if panel and type(panel.GetChildren) == "function" then
+    local ok, a, b, c, d, e, f, g, h = pcall(panel.GetChildren, panel)
+    if ok then
+      for _, child in ipairs({ a, b, c, d, e, f, g, h }) do
+        if type(child) == "table" and type(child.HookScript) == "function"
+          and (GetResultID(child) or type(child.GetData) == "function") then
+          out[#out + 1] = child
+        end
+      end
+    end
+    if #out > 0 then dbg.strategy = "children" return end
+  end
+  dbg.strategy = "none"
 end
 
 function NS.BrowserSignup(resultID)
@@ -102,7 +221,8 @@ function NS.BrowserSignup(resultID)
   local db = MDB()
   local roles = (db.rememberRoles and db.roles) or { tank = false, healer = false, dps = true }
   if not (roles.tank or roles.healer or roles.dps) then roles.dps = true end
-  local ok = pcall(C_LFGList.ApplyToGroup, resultID, "", roles.tank, roles.healer, roles.dps)
+  -- NOTE: no comment arg on this client generation: (resultID, tank, healer, dps).
+  local ok = pcall(C_LFGList.ApplyToGroup, resultID, roles.tank, roles.healer, roles.dps)
   if ok then
     local okI, info = pcall(C_LFGList.GetSearchResultInfo, resultID)
     info = (okI and type(info) == "table") and info or {}
@@ -117,41 +237,58 @@ function NS.BrowserSignup(resultID)
 end
 
 local function DecorateRows()
-  if not (LFGListFrame and LFGListFrame.SearchPanel) then return end
+  local dbg = NS._browserDebug
+  if not (LFGListFrame and LFGListFrame.SearchPanel or GroupFinderFrame and GroupFinderFrame.SearchPanel) then return end
   if not (C_LFGList and C_LFGList.GetSearchResultInfo) then return end
   local buttons = {}
   CollectSearchButtons(buttons)
+  dbg.frames = #buttons
+  local withID, tagged, errors = 0, 0, 0
   for _, b in ipairs(buttons) do
-    local resultID = b.resultID
+    local okRow, resultID = pcall(GetResultID, b)
+    if not okRow then resultID = nil end
     if resultID then
+      withID = withID + 1
       local okI, info = pcall(C_LFGList.GetSearchResultInfo, resultID)
       if okI and type(info) == "table" then
-        local tag = RowTag(info)
-        if tag then
-          if not b._lfgsTag then
-            local fs = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            fs:SetPoint("RIGHT", b, "RIGHT", -96, 0)
-            b._lfgsTag = fs
-          end
-          b._lfgsTag:SetText(tag)
-          b._lfgsTag:Show()
-        elseif b._lfgsTag then
-          b._lfgsTag:Hide()
+        local okTag, tag = pcall(RowTag, info)
+        if not okTag then
+          errors = errors + 1
+          tag = nil
         end
+        if tag then
+          tagged = tagged + 1
+          if not b._lfgsTag then
+            local okF, fs = pcall(b.CreateFontString, b, nil, "OVERLAY", "GameFontHighlightSmall")
+            if okF and fs then
+              pcall(fs.SetPoint, fs, "RIGHT", b, "RIGHT", -96, 0)
+              b._lfgsTag = fs
+            end
+          end
+          if b._lfgsTag then
+            pcall(b._lfgsTag.SetText, b._lfgsTag, tag)
+            pcall(b._lfgsTag.Show, b._lfgsTag)
+          end
+        elseif b._lfgsTag then
+          pcall(b._lfgsTag.Hide, b._lfgsTag)
+        end
+      else
+        errors = errors + 1
       end
     end
     -- Double-click signup (own timestamp detection; no click re-registration).
-    if MDB().doubleClick ~= false and not b._lfgsDC then
+    if MDB().doubleClick ~= false and not b._lfgsDC and type(b.HookScript) == "function" then
       b._lfgsDC = true
-      b:HookScript("OnMouseUp", function(self, mouseBtn)
+      pcall(b.HookScript, b, "OnMouseUp", function(self, mouseBtn)
         if mouseBtn ~= "LeftButton" then return end
         local db = MDB()
         if db.doubleClick == false then return end
         local now = GetTime()
         if self._lfgsLastClick and (now - self._lfgsLastClick) < 0.35 then
           self._lfgsLastClick = nil
-          if self.resultID then
-            NS.BrowserSignup(self.resultID)
+          local rid = GetResultID(self)
+          if rid then
+            NS.BrowserSignup(rid)
           end
         else
           self._lfgsLastClick = now
@@ -159,6 +296,7 @@ local function DecorateRows()
       end)
     end
   end
+  dbg.withID, dbg.tagged, dbg.errors = withID, tagged, errors
 end
 
 local decoratePending
@@ -177,7 +315,8 @@ end
 
 local function InstallApplyHook()
   if not (C_LFGList and C_LFGList.ApplyToGroup) then return end
-  local ok = pcall(hooksecurefunc, C_LFGList, "ApplyToGroup", function(resultID, _, tank, healer, dps)
+  -- NOTE: (resultID, tank, healer, dps) on this client generation.
+  local ok = pcall(hooksecurefunc, C_LFGList, "ApplyToGroup", function(resultID, tank, healer, dps)
     local db = MDB()
     if db.rememberRoles ~= false then
       db.roles = { tank = tank and true or false, healer = healer and true or false, dps = dps and true or false }
@@ -222,6 +361,48 @@ NS.SlashHandlers = NS.SlashHandlers or {}
 NS.SlashHandlers.refresh = function() NS.BrowserRefresh() end
 
 -- ---------------------------------------------------------------------------
+-- Lazy hooks: Blizzard's Group Finder is load-on-demand, so at our
+-- ADDON_LOADED the frames may not exist yet. Re-run on login; hook OnShow
+-- so opening the window always triggers a decoration pass.
+-- ---------------------------------------------------------------------------
+
+local hooksInstalled = false
+
+local function EnsureHooks()
+  if hooksInstalled then return end
+  local lfg = LFGListFrame or GroupFinderFrame
+  if type(lfg) ~= "table" or type(lfg.HookScript) ~= "function" then return end
+  local ok = pcall(lfg.HookScript, lfg, "OnShow", function() ScheduleDecorate() end)
+  if ok then hooksInstalled = true end
+end
+
+-- /lfgs browse — one-line diagnostics + full breakdown. Run it with the
+-- Group Finder open and paste the output when tags don't show.
+NS.SlashHandlers.browse = function()
+  EnsureHooks()
+  ScheduleDecorate()
+  C_Timer.After(0.4, function()
+    local dbg = NS._browserDebug or {}
+    local db = MDB()
+    NS.Print(string.format("browser: module %s, tags %s, dblclick %s",
+      NS.IsModuleEnabled("browser") and "ON" or "OFF",
+      db.tags ~= false and "ON" or "OFF",
+      db.doubleClick ~= false and "ON" or "OFF"))
+    print(string.format("  event=%s strategy=%s frames=%s withID=%s tagged=%s errors=%s",
+      tostring(dbg.lastEvent), tostring(dbg.strategy),
+      tostring(dbg.frames), tostring(dbg.withID),
+      tostring(dbg.tagged), tostring(dbg.errors)))
+    if (dbg.frames or 0) == 0 then
+      print("  no rows found — open Premade Groups and run a search first")
+    elseif (dbg.withID or 0) == 0 then
+      print("  rows found but no result IDs — Blizzard renamed the row field again")
+    elseif (dbg.tagged or 0) == 0 then
+      print("  rows readable but no tags — listing fields (age/score) renamed or tags off")
+    end
+  end)
+end
+
+-- ---------------------------------------------------------------------------
 -- Module
 -- ---------------------------------------------------------------------------
 
@@ -232,16 +413,23 @@ local M = {
   phase = 1,
   status = "alpha",
   defaultEnabled = true,
-  events = { "LFG_LIST_SEARCH_RESULTS_UPDATED" },
+  events = { "LFG_LIST_SEARCH_RESULTS_UPDATED", "PLAYER_ENTERING_WORLD" },
   OnLoad = function()
     MDB()
     InstallApplyHook()
+    EnsureHooks()
   end,
   OnEnable = function()
     MDB()
     InstallApplyHook()
+    EnsureHooks()
   end,
-  OnEvent = function()
+  OnEvent = function(_, event)
+    NS._browserDebug.lastEvent = event
+    if event == "PLAYER_ENTERING_WORLD" then
+      EnsureHooks()
+      return
+    end
     ScheduleDecorate()
   end,
   OnOptions = function(ctx)
