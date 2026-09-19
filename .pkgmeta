@@ -1,0 +1,12 @@
+# LFGSuite packager config (CurseForge / Wago via BigWigs packager)
+# Tag a release (git tag v0.1.1) and the packager zips the addon as "LFGSuite".
+package-as: LFGSuite
+
+# No external libraries to bundle.
+enable-nolib-creation: no
+
+# Dev docs don't ship inside the addon zip (README.md ships: it doubles as
+# the CurseForge description).
+ignore:
+  - .github
+  - PLAN.md

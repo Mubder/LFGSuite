@@ -1,0 +1,5 @@
+<Bindings>
+  <Binding name="LFGSUITE_BROWSEREFRESH" header="LFGSUITE">
+    LFGSuite.BrowserRefresh()
+  </Binding>
+</Bindings>
