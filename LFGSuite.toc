@@ -2,7 +2,7 @@
 ## Title: LFG Suite
 ## Notes: All-in-one LFG + Mythic+ companion: keystones, group browsing, queue QoL, M+ timer, forces, loot, alts. Modular - enable what you need.
 ## Author: LFGSuite
-## Version: 0.1.1
+## Version: 0.1.2
 ## SavedVariables: LFGSuiteDB
 ## IconTexture: Interface\Icons\INV_Misc_GroupNeedMore
 

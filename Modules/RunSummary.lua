@@ -27,6 +27,7 @@ local function MDB() return NS.EnsureModuleDB("runsummary", SUMMARY_DEFAULTS) en
 
 local lastRun -- session: the last completion snapshot for /lfgs summary
 local frame
+local sawStart = false -- true once CHALLENGE_MODE_START fired this session
 
 -- ---------------------------------------------------------------------------
 -- Completion info probe: the API name/shape differs across client
@@ -50,7 +51,12 @@ local function ReadCompletionInfo()
   local mapID = info.mapChallengeModeID or info.mapID or info.challengeMapID
   local level = info.level or info.keystoneLevel
   local timeSec = info.time
-  if not (type(mapID) == "number" and type(level) == "number" and type(timeSec) == "number") then
+  -- Reject stale/empty structs: Blizzard can return a zeroed table when no
+  -- run just finished (this produced the "? +0 DEPLETED / Time: -" popup).
+  -- Types alone are not enough; values must be sane.
+  if not (type(mapID) == "number" and mapID > 0
+    and type(level) == "number" and level >= 2
+    and type(timeSec) == "number" and timeSec > 0) then
     return nil
   end
   local mapName = Util.GetChallengeMapName(mapID) or "?"
@@ -58,6 +64,11 @@ local function ReadCompletionInfo()
   if C_ChallengeMode.GetMapUIInfo then
     local ok, _, _, tl = pcall(C_ChallengeMode.GetMapUIInfo, mapID)
     if ok and type(tl) == "number" and tl > 0 then timeLimit = tl end
+  end
+  local deaths = 0
+  if C_ChallengeMode.GetDeathCount then
+    local okD, d = pcall(C_ChallengeMode.GetDeathCount)
+    if okD and type(d) == "number" and d >= 0 then deaths = math.floor(d) end
   end
   return {
     mapID = mapID, level = level, time = timeSec,
@@ -67,7 +78,7 @@ local function ReadCompletionInfo()
     oldScore = type(info.oldOverallDungeonScore) == "number" and info.oldOverallDungeonScore or nil,
     newScore = type(info.newOverallDungeonScore) == "number" and info.newOverallDungeonScore or nil,
     mapName = mapName, timeLimit = timeLimit,
-    deaths = (C_ChallengeMode.GetDeathCount and select(2, pcall(C_ChallengeMode.GetDeathCount))) or 0,
+    deaths = deaths,
   }
 end
 
@@ -199,13 +210,36 @@ local M = {
   phase = 3,
   status = "alpha",
   defaultEnabled = true,
-  events = { "CHALLENGE_MODE_COMPLETED" },
+  events = { "CHALLENGE_MODE_START", "CHALLENGE_MODE_COMPLETED", "CHALLENGE_MODE_RESET", "PLAYER_ENTERING_WORLD" },
   OnLoad = function() MDB() end,
   OnEnable = function() MDB() end,
   OnDisable = function()
     if frame then frame:Hide() end
   end,
-  OnEvent = function()
+  OnEvent = function(_, event)
+    if event == "CHALLENGE_MODE_START" then
+      sawStart = true
+      return
+    elseif event == "CHALLENGE_MODE_RESET" then
+      sawStart = false
+      return
+    elseif event == "PLAYER_ENTERING_WORLD" then
+      -- Reload inside an active run: re-arm so the legit completion still
+      -- shows. Otherwise a stale COMPLETED keeps us disarmed (no popup).
+      C_Timer.After(2, function()
+        if C_ChallengeMode and C_ChallengeMode.GetActiveChallengeMapID then
+          local ok, mapID = pcall(C_ChallengeMode.GetActiveChallengeMapID)
+          sawStart = ok and type(mapID) == "number" and mapID > 0 or false
+        else
+          sawStart = false
+        end
+      end)
+      return
+    elseif event ~= "CHALLENGE_MODE_COMPLETED" then
+      return
+    end
+    if not sawStart then return end
+    sawStart = false -- consume once; a stale duplicate COMPLETED can't re-pop
     -- Give Blizzard a moment to settle the completion data, then snapshot.
     C_Timer.After(1, function()
       local run = ReadCompletionInfo()

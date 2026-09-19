@@ -10,7 +10,7 @@ LFGSuite = LFGSuite or {}
 local NS = LFGSuite
 local L = NS.L or {} -- from Locales\enUS.lua (loaded first per .toc)
 local function l(key, fallback) return L[key] or fallback end
-NS.BUILD = 2 -- bump every shipment; shown in load message + window titles
+NS.BUILD = 3 -- bump every shipment; shown in load message + window titles
 
 -- ---------------------------------------------------------------------------
 -- Defaults / DB
@@ -215,8 +215,18 @@ eventFrame:SetScript("OnEvent", function(_, event, ...)
   if not (NS.db and NS.db.enabled) then return end
   for _, def in ipairs(NS.Modules) do
     if NS.IsModuleEnabled(def.key) and type(def.OnEvent) == "function" then
-      local ok, err = pcall(def.OnEvent, def, event, ...)
-      if not ok then NS.ModuleError(def, err) end
+      -- Route only events the module subscribed to. Without this, every
+      -- module receives every event on the shared frame (e.g. RunSummary
+      -- got UNIT_TARGET / PLAYER_ENTERING_WORLD and popped its panel on
+      -- login and on NPC talk).
+      local wants = false
+      for _, ev in ipairs(def.events or {}) do
+        if ev == event then wants = true break end
+      end
+      if wants then
+        local ok, err = pcall(def.OnEvent, def, event, ...)
+        if not ok then NS.ModuleError(def, err) end
+      end
     end
   end
 end)
