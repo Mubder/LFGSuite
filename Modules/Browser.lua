@@ -69,7 +69,7 @@ local BROWSER_DEFAULTS = {
     needs = { tank = false, healer = false, dps = false }, -- group still LACKS role
     minMembers = 0,  -- at least N members; 0 = off
     minReqIlvl = 0,  -- listing requires ilvl >= N; 0 = off (unknown stays)
-    activities = {}, -- [activityID] = true: keep only these dungeons (none = all)
+    dungeons = {},  -- [mapID] = true: keep ONLY these M+ dungeons (none = all)
     cardHidden = nil, -- user closed the filter card on purpose
   },
 }
@@ -191,6 +191,8 @@ end
 -- Blizzard's rows, never drop listings we cannot read)
 -- ---------------------------------------------------------------------------
 
+local DungeonNameToID -- forward-declared: defined in the dungeon-grid block
+
 local function FiltersEnabled()
   local f = MDB().filters
   return type(f) == "table" and f.enabled == true
@@ -242,14 +244,25 @@ local function RowFilteredOut(info)
     -- Unknown requirement: keep.
     if type(req) == "number" and req > 0 and req < f.minReqIlvl then return true end
   end
-  -- Dungeon whitelist: ticked activities keep; unknown activity stays.
-  local acts = f.activities or {}
-  local anyAct = false
-  for _ in pairs(acts) do anyAct = true break end
-  if anyAct then
+  -- Dungeon whitelist: ticked challenge maps keep. A listing's dungeon is
+  -- resolved via its activity name against the season's map names;
+  -- unresolved listings stay (never hide unreadable).
+  local dungeons = f.dungeons or {}
+  local anyDungeon = false
+  for _ in pairs(dungeons) do anyDungeon = true break end
+  if anyDungeon then
     local aid = info.activityID
     if (not aid) and type(info.activityIDs) == "table" then aid = info.activityIDs[1] end
-    if aid and not acts[aid] then return true end
+    if aid and C_LFGList.GetActivityInfoTable then
+      local okA, ai = pcall(C_LFGList.GetActivityInfoTable, aid)
+      if okA and type(ai) == "table" then
+        local aname = ai.shortName or ai.fullName
+        if type(aname) == "string" and aname ~= "" then
+          local mapID = DungeonNameToID(aname)
+          if mapID and not dungeons[mapID] then return true end
+        end
+      end
+    end
   end
   return false
 end
@@ -560,6 +573,40 @@ local function FilterNumBox(parent, label, x, y, w, get, set)
   return box
 end
 
+-- Season dungeon list: the current M+ pool straight from the client
+-- (C_ChallengeMode.GetMapTable + GetMapUIInfo - real names, no search
+-- needed). Cached per session; names never change at runtime.
+local seasonMaps
+local function GetSeasonMaps()
+  if seasonMaps ~= nil then return seasonMaps end
+  seasonMaps = {}
+  if not (C_ChallengeMode and C_ChallengeMode.GetMapTable) then return seasonMaps end
+  local ok, maps = pcall(C_ChallengeMode.GetMapTable)
+  if ok and type(maps) == "table" then
+    for _, mapID in ipairs(maps) do
+      local name = Util.GetChallengeMapName(mapID)
+      if name and name ~= "" then
+        seasonMaps[#seasonMaps + 1] = { mapID = mapID, name = name }
+      end
+    end
+    table.sort(seasonMaps, function(a, b) return a.name < b.name end)
+  end
+  return seasonMaps
+end
+
+-- Listing activity name -> challenge mapID (name-keyed lookup).
+local nameToMapID
+function DungeonNameToID(activityName)
+  if type(activityName) ~= "string" then return nil end
+  if nameToMapID == nil then
+    nameToMapID = {}
+    for _, m in ipairs(GetSeasonMaps()) do
+      nameToMapID[m.name:lower()] = m.mapID
+    end
+  end
+  return nameToMapID[activityName:lower()]
+end
+
 -- Segmented key-level toggles ("difficulty" as checkboxes): +2..+10 mini
 -- buttons; any ticked = whitelist, none = no level filtering.
 local function LevelButton(parent, lvl, x, y)
@@ -665,7 +712,7 @@ local function BuildFilterPanel()
   if filterFrame then return end
   if not PVEFrame then return end -- binds to the Group Finder window
   filterFrame = CreateFrame("Frame", "LFGSuiteBrowserFilters", PVEFrame)
-  filterFrame:SetSize(248, 392)
+  filterFrame:SetSize(248, 470)
   -- Stick to the Group Finder: parenting makes it move + hide together.
   filterFrame:SetPoint("TOPLEFT", PVEFrame, "TOPRIGHT", 8, 0)
   filterFrame:SetFrameStrata("HIGH")
@@ -710,93 +757,58 @@ local function BuildFilterPanel()
   end)
   PaintSortMode()
   y = y - 30
-  -- Dungeon selection: activities seen in the CURRENT search, multi-select
-  -- via a dropdown (the card stays compact).
-  filterFrame.dungeonBtn = CreateFrame("Button", nil, filterFrame, "UIPanelButtonTemplate")
-  filterFrame.dungeonBtn:SetSize(216, 22)
-  filterFrame.dungeonBtn:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
-  local function PaintDungeonBtn()
-    local acts = MDB().filters.activities or {}
-    local n = 0
-    for _ in pairs(acts) do n = n + 1 end
-    filterFrame.dungeonBtn:SetText(n > 0
-      and l("filters_dungeons_fmt", "Dungeons: %d picked"):format(n)
-      or l("filters_dungeons_all", "Dungeons: All"))
-  end
-  local function HarvestActivities()
-    -- Unique activities from the live search (verified shape: total, list).
-    local out, seen = {}, {}
-    local ids = nil
-    if C_LFGList.GetSearchResults then
-      local okR, list = pcall(C_LFGList.GetSearchResults)
-      if okR and type(list) == "table" then ids = list
-      elseif okR and type(list) == "number" then
-        local okR2, _, list2 = pcall(C_LFGList.GetSearchResults)
-        if okR2 and type(list2) == "table" then ids = list2 end
+  -- Dungeon selection: the season's M+ dungeons as toggle chips
+  -- (real names from the client; always listed, no search needed).
+  y = y - 26
+  local dl = filterFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  dl:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
+  dl:SetJustifyH("LEFT")
+  dl:SetText("|cffffd100" .. l("filters_dungeons", "Dungeons") .. "|r  "
+    .. "|cff888888" .. l("filters_levelhint", "(none = all)") .. "|r")
+  y = y - 18
+  do
+    local maps = GetSeasonMaps()
+    local COLS = 2
+    local cw = 104
+    for i, m in ipairs(maps) do
+      local col = ((i - 1) % COLS)
+      local row = math.floor((i - 1) / COLS)
+      local chip = CreateFrame("Button", nil, filterFrame)
+      chip:SetSize(cw, 18)
+      chip:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16 + col * (cw + 4), y + row * 20)
+      local bg = chip:CreateTexture(nil, "BACKGROUND")
+      bg:SetAllPoints()
+      local label = Util.AbbrevDungeonName(m.name) or m.name
+      if #label > 14 then label = label:sub(1, 13) .. "." end
+      local t = chip:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      t:SetAllPoints()
+      t:SetJustifyH("CENTER")
+      function chip:Paint()
+        local on = (MDB().filters.dungeons or {})[m.mapID]
+        bg:SetColorTexture(on and 0.55 or 0.08, on and 0.42 or 0.11, on and 0.12 or 0.18, on and 0.95 or 0.75)
+        t:SetText(on and ("|cffffd100" .. label .. "|r") or ("|cffbbbbbb" .. label .. "|r"))
       end
-    end
-    for _, rid in ipairs(ids or {}) do
-      local okI, info = pcall(C_LFGList.GetSearchResultInfo, rid)
-      if okI and type(info) == "table" then
-        local aid = info.activityID
-        if (not aid) and type(info.activityIDs) == "table" then aid = info.activityIDs[1] end
-        if aid and not seen[aid] then
-          seen[aid] = true
-          local name = tostring(aid)
-          if C_LFGList.GetActivityInfoTable then
-            local okA, ai = pcall(C_LFGList.GetActivityInfoTable, aid)
-            if okA and type(ai) == "table" then
-              name = ai.shortName or ai.fullName or name
-            end
-          end
-          out[#out + 1] = { id = aid, name = name }
-        end
-      end
-    end
-    table.sort(out, function(a, b) return a.name < b.name end)
-    return out
-  end
-  filterFrame.dungeonBtn:SetScript("OnClick", function(self)
-    local list = HarvestActivities()
-    if #list == 0 then
-      NS.Print(l("filters_dungeons_none", "No dungeons in the current search - run a search first."))
-      return
-    end
-    if MenuUtil and MenuUtil.CreateContextMenu then
-      MenuUtil.CreateContextMenu(self, function(_, root)
-        root:CreateTitle(l("filters_dungeons", "Dungeons"))
-        local okCB = pcall(function()
-          root:CreateCheckbox(l("filters_dungeons_all", "All (clear selection)"),
-            function() return false end,
-            function()
-              MDB().filters.activities = {}
-              PaintDungeonBtn()
-              ApplyFiltersToList()
-            end)
-        end)
-        for _, act in ipairs(list) do
-          pcall(function()
-            root:CreateCheckbox(act.name,
-              function() return (MDB().filters.activities or {})[act.id] == true end,
-              function()
-                local f = MDB().filters
-                f.activities = f.activities or {}
-                f.activities[act.id] = (not f.activities[act.id]) or nil
-                PaintDungeonBtn()
-                ApplyFiltersToList()
-              end)
-          end)
-        end
+      chip:SetScript("OnClick", function(self)
+        local f = MDB().filters
+        f.dungeons = f.dungeons or {}
+        f.dungeons[m.mapID] = (not f.dungeons[m.mapID]) or nil
+        self:Paint()
+        ApplyFiltersToList()
       end)
-    else
-      -- Pre-MenuUtil fallback: cycle is pointless for 8 dungeons; just clear.
-      MDB().filters.activities = {}
-      PaintDungeonBtn()
-      ApplyFiltersToList()
+      chip:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText(m.name, 1, 0.82, 0)
+        GameTooltip:AddLine(l("filters_dungeon_tip", "Tick to keep only this dungeon."), 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+      end)
+      chip:SetScript("OnLeave", function() GameTooltip:Hide() end)
+      chip:Paint()
+      filterFrame._dungeonChips = filterFrame._dungeonChips or {}
+      filterFrame._dungeonChips[#filterFrame._dungeonChips + 1] = chip
     end
-  end)
-  PaintDungeonBtn()
-  y = y - 28
+    local rows = math.max(1, math.ceil(math.max(#maps, 1) / 2))
+    y = y + rows * 20 + 4
+  end
   local kl = filterFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   kl:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
   kl:SetJustifyH("LEFT")
