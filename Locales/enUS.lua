@@ -118,6 +118,9 @@ LFGSuite.L = {
   filters_needshint = "(tick = must lack)",
   filters_minmembers = "Min members",
   filters_minreqilvl = "Min ilvl req",
+  role_tank = "Tank",
+  role_heal = "Heal",
+  role_dps = "DPS",
 
   -- Timer / Forces
   remains = "remains",

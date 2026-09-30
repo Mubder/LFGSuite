@@ -4,7 +4,9 @@
 -- Mythic Plus Tweaks (LFG leader score tag).
 --
 -- Feature checklist:
---   [x] Listing age tag per row ("2m") - hidden if Premade Sort is loaded
+--   [x] Listing age tag per row ("2m") top-right - hidden if Premade Sort
+--       is loaded; key level + leader realm on the left, leader M+ score
+--       on the right (Blizzard rarity color) - LFG Inspect-style layout
 --   [x] Key level tag parsed from listing title ("+7") - only when Midnight's
 --       kstring wrapping leaves the title readable (degrades silently)
 --   [x] Leader realm tag from partyGUID (the practical "region" info; hidden
@@ -146,18 +148,22 @@ local function ColorScore(score)
   return "|cff55ff55" .. tostring(score) .. "|r"
 end
 
-local function RowTag(info)
-  local db = MDB()
-  if db.tags == false then return nil end
-  local parts = {}
+-- LFG Inspect-style row layout: listing age top-right, key level + leader
+-- realm on the left, leader score on the right (before the icon block).
+local function RowTagAge(info)
+  if MDB().tags == false then return nil end
   -- Deference: Premade Sort already draws listing age.
-  if not (IsAddonLoaded("Premade Sort") or IsAddonLoaded("PremadeSort")) then
-    local age = GetListingAge(info)
-    if age then
-      local ageTxt = Util.FormatAge(age)
-      if ageTxt then parts[#parts + 1] = "|cffa0a0a0" .. ageTxt .. "|r" end
-    end
-  end
+  if IsAddonLoaded("Premade Sort") or IsAddonLoaded("PremadeSort") then return nil end
+  local age = GetListingAge(info)
+  if not age then return nil end
+  local ageTxt = Util.FormatAge(age)
+  if ageTxt then return "|cffa0a0a0" .. ageTxt .. "|r" end
+  return nil
+end
+
+local function RowTagLeft(info)
+  if MDB().tags == false then return nil end
+  local parts = {}
   local title = Util.CleanKString((info.name or "") .. " " .. (info.comment or ""))
   local keyLevel = Util.ParseKeyLevel(title)
   if keyLevel then parts[#parts + 1] = "|cffffd100+" .. keyLevel .. "|r" end
@@ -167,10 +173,15 @@ local function RowTag(info)
   if realm and realm ~= "" and realm:lower() ~= myRealm:lower() then
     parts[#parts + 1] = "|cff9ec1e8" .. realm .. "|r"
   end
-  local score = GetLeaderScore(info)
-  if score then parts[#parts + 1] = ColorScore(score) end
   if #parts == 0 then return nil end
   return table.concat(parts, " ")
+end
+
+local function RowTagScore(info)
+  if MDB().tags == false then return nil end
+  local score = GetLeaderScore(info)
+  if score then return ColorScore(score) end
+  return nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -374,6 +385,41 @@ end
 
 -- Decorates one row. Returns "tagged", "id" (had a resultID), "err" or nil so
 -- the batch pass and /lfgs browse diagnostics can count outcomes.
+-- Tag slot helper: creates the row's fontstring once, anchored per slot.
+--   left  = after the playstyle text (3rd line's free space)
+--   right = just left of the class/role icon block (DataDisplay)
+--   top   = the row's top-right corner (listing age)
+local function TagSlot(b, slot)
+  local key = "_lfgsTag_" .. slot
+  if b[key] then return b[key] end
+  local okF, fs = pcall(b.CreateFontString, b, nil, "OVERLAY", "GameFontHighlightSmall")
+  if not (okF and fs) then return nil end
+  if slot == "top" then
+    pcall(fs.SetPoint, fs, "TOPRIGHT", b, "TOPRIGHT", -4, -3)
+    pcall(fs.SetJustifyH, fs, "RIGHT")
+  elseif slot == "right" then
+    local anchored = false
+    if b.DataDisplay then
+      anchored = pcall(fs.SetPoint, fs, "RIGHT", b.DataDisplay, "LEFT", -6, 0)
+    end
+    if not anchored then
+      pcall(fs.SetPoint, fs, "BOTTOMRIGHT", b, "BOTTOMRIGHT", -6, 5)
+    end
+    pcall(fs.SetJustifyH, fs, "RIGHT")
+  else
+    local anchored = false
+    if b.Playstyle then
+      anchored = pcall(fs.SetPoint, fs, "LEFT", b.Playstyle, "RIGHT", 10, 0)
+    end
+    if not anchored then
+      pcall(fs.SetPoint, fs, "BOTTOMLEFT", b, "BOTTOMLEFT", 10, 6)
+    end
+    pcall(fs.SetJustifyH, fs, "LEFT")
+  end
+  b[key] = fs
+  return fs
+end
+
 local function DecorateRow(b)
   if type(b) ~= "table" then return nil end
   if not (C_LFGList and C_LFGList.GetSearchResultInfo) then return nil end
@@ -386,38 +432,27 @@ local function DecorateRow(b)
   local filtered = RowFilteredOut(info)
   b._lfgsFiltered = filtered or nil
   pcall(b.SetAlpha, b, filtered and 0.15 or 1)
-  local okTag, tag = pcall(RowTag, info)
-  if not okTag then tag = nil end
-  if tag then
-    if not b._lfgsTag then
-      local okF, fs = pcall(b.CreateFontString, b, nil, "OVERLAY", "GameFontHighlightSmall")
-      if okF and fs then
-        -- The row's third line (Playstyle: "Relaxed/Competitive", usually
-        -- short or empty) is the only reliably free space - the title and
-        -- activity lines span the middle, and the class/role icon block
-        -- alone is 125px wide. Sit the tag right after the playstyle text.
-        local anchored = false
-        if b.Playstyle then
-          anchored = pcall(fs.SetPoint, fs, "LEFT", b.Playstyle, "RIGHT", 10, 0)
-        end
-        if not anchored and b.DataDisplay then
-          anchored = pcall(fs.SetPoint, fs, "RIGHT", b.DataDisplay, "LEFT", -8, 0)
-        end
-        if not anchored then
-          pcall(fs.SetPoint, fs, "BOTTOMLEFT", b, "BOTTOMLEFT", 10, 6)
-        end
-        pcall(fs.SetJustifyH, fs, "LEFT")
-        b._lfgsTag = fs
+  local any = false
+  local slots = {
+    { key = "top", producer = RowTagAge },
+    { key = "left", producer = RowTagLeft },
+    { key = "right", producer = RowTagScore },
+  }
+  for _, s in ipairs(slots) do
+    local okTag, text = pcall(s.producer, info)
+    if not okTag then text = nil end
+    local fs = TagSlot(b, s.key)
+    if fs then
+      if text then
+        pcall(fs.SetText, fs, text)
+        pcall(fs.Show, fs)
+        any = true
+      else
+        pcall(fs.Hide, fs)
       end
     end
-    if b._lfgsTag then
-      pcall(b._lfgsTag.SetText, b._lfgsTag, tag)
-      pcall(b._lfgsTag.Show, b._lfgsTag)
-    end
-    return "tagged"
   end
-  if b._lfgsTag then pcall(b._lfgsTag.Hide, b._lfgsTag) end
-  return "id"
+  return any and "tagged" or "id"
 end
 
 local function InstallDoubleClick(b)
@@ -802,12 +837,25 @@ local function InstallTooltipHook()
       local db = MDB()
       if db.inspectShiftOnly ~= false and not IsShiftKeyDown() then return end
       local nm = info.numMembers or info.memberCount or 0
+      -- Member roster via the modern table API (name/class/role/spec/leader).
+      -- The old positional GetSearchResultMemberInfo is deprecated AND its
+      -- Midnight return order differs from what we used to unpack.
       local members = {}
-      if C_LFGList and C_LFGList.GetSearchResultMemberInfo then
+      local getPlayerInfo = C_LFGList and C_LFGList.GetSearchResultPlayerInfo
+      if type(getPlayerInfo) == "function" then
         for i = 1, math.min(nm, 40) do
-          local okM, mname, _, _, _, _, mclass = pcall(C_LFGList.GetSearchResultMemberInfo, rid, i)
-          if okM and type(mname) == "string" and mname ~= "" then
-            members[#members + 1] = { name = mname, class = mclass }
+          local okM, pi = pcall(getPlayerInfo, rid, i)
+          if okM and type(pi) == "table" then
+            local mname = pi.name or pi.fullName
+            if type(mname) == "string" and mname ~= "" then
+              members[#members + 1] = {
+                name = mname,
+                class = pi.classFilename,
+                role = pi.assignedRole,
+                spec = pi.specName,
+                leader = pi.isLeader == true,
+              }
+            end
           end
         end
       end
@@ -825,13 +873,28 @@ local function InstallTooltipHook()
         GameTooltip:AddLine("|cffff3333" .. l("tt_ignored", "IGNORED players in group") .. ": "
           .. table.concat(ignored, ", ") .. "|r", 1, 0.3, 0.3, true)
       end
-      -- Member list (names, class colored) - full for dungeons, counts for raids.
+      -- Member list: name (class color) + spec/role, leader starred -
+      -- full lines for dungeons, count summary for raids.
+      local ROLE_TXT = {
+        TANK = "|cff55aaff" .. l("role_tank", "Tank") .. "|r",
+        HEALER = "|cff55ff55" .. l("role_heal", "Heal") .. "|r",
+        DAMAGER = "|cffffcc55" .. l("role_dps", "DPS") .. "|r",
+      }
       if #members <= 6 then
-        local names = {}
+        local lines = {}
         for _, m in ipairs(members) do
-          names[#names + 1] = Util.ClassColorize(m.class, Util.ShortName(m.name))
+          local who = Util.ClassColorize(m.class, Util.ShortName(m.name))
+          if m.leader then who = "|cffffd100★|r" .. who end
+          local detail = {}
+          if m.spec and m.spec ~= "" then detail[#detail + 1] = m.spec end
+          if m.role then detail[#detail + 1] = ROLE_TXT[m.role] or m.role end
+          if #detail > 0 then
+            lines[#lines + 1] = who .. " |cff888888(|r" .. table.concat(detail, " ") .. "|cff888888)|r"
+          else
+            lines[#lines + 1] = who
+          end
         end
-        GameTooltip:AddLine(table.concat(names, "  "), 0.9, 0.9, 0.9, true)
+        GameTooltip:AddLine(table.concat(lines, "\n"), 0.9, 0.9, 0.9, true)
       else
         GameTooltip:AddLine(string.format(l("tt_members_fmt", "%d members"), #members), 0.9, 0.9, 0.9)
       end
