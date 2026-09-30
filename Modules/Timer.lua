@@ -199,13 +199,14 @@ local function EnsureDeathFeed()
   if deathFeedTried then return end
   deathFeedTried = true
   local f = CreateFrame("Frame")
-  for _, ev in ipairs({ "COMBAT_LOG_EVENT_UNTRUSTED", "COMBAT_LOG_EVENT" }) do
-    if pcall(f.RegisterEvent, f, ev) then
-      f:SetScript("OnEvent", function() TrackDeathCLEU() end)
-      return
-    end
+  -- Only the *_UNTRUSTED variant is addon-registerable; plain
+  -- COMBAT_LOG_EVENT is PROTECTED and attempting it fires
+  -- ADDON_ACTION_FORBIDDEN, so it is never probed.
+  if pcall(f.RegisterEvent, f, "COMBAT_LOG_EVENT_UNTRUSTED") then
+    f:SetScript("OnEvent", function() TrackDeathCLEU() end)
+    return
   end
-  -- No combat-log event on this client: poll alive->dead transitions (2Hz,
+  -- No combat-log feed on this client: poll alive->dead transitions (2Hz,
   -- only meaningful during runs; guard inside PollDeaths).
   f:SetScript("OnUpdate", function(self)
     if (GetTime() - (self._t or 0)) < 0.5 then return end
