@@ -398,13 +398,10 @@ local function TagSlot(b, slot)
     pcall(fs.SetPoint, fs, "TOPRIGHT", b, "TOPRIGHT", -4, -3)
     pcall(fs.SetJustifyH, fs, "RIGHT")
   elseif slot == "right" then
-    local anchored = false
-    if b.DataDisplay then
-      anchored = pcall(fs.SetPoint, fs, "RIGHT", b.DataDisplay, "LEFT", -6, 0)
-    end
-    if not anchored then
-      pcall(fs.SetPoint, fs, "BOTTOMRIGHT", b, "BOTTOMRIGHT", -6, 5)
-    end
+    -- Bottom-right corner: the dungeon-name line owns the middle, and the
+    -- icon block's left edge varies with group size, so the corner is the
+    -- only reliably free right-side spot.
+    pcall(fs.SetPoint, fs, "BOTTOMRIGHT", b, "BOTTOMRIGHT", -6, 4)
     pcall(fs.SetJustifyH, fs, "RIGHT")
   else
     local anchored = false
