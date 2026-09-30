@@ -56,7 +56,7 @@ local BROWSER_DEFAULTS = {
   doubleClick = true,
   rememberRoles = true,
   roles = nil, -- { tank, healer, dps } captured on signup
-  inspectShiftOnly = true, -- listing group-inspect tooltip on Shift only
+  inspectShiftOnly = false, -- group-inspect tooltip shows on plain hover
   -- Listing filters (panel: /lfgs filters, bound to the Group Finder
   -- window). Non-destructive: filtered rows are dimmed, never removed from
   -- Blizzard's list (ScrollBox reordering stays off limits).
@@ -961,6 +961,9 @@ local function EnsureHooks()
   local lfg = LFGListFrame or GroupFinderFrame
   if type(lfg) ~= "table" or type(lfg.HookScript) ~= "function" then return end
   local ok = pcall(lfg.HookScript, lfg, "OnShow", function()
+    -- The Group Finder UI just loaded: now the row/tooltip hooks can grab
+    -- Blizzard's globals (they do not exist before this).
+    EnsureHooks()
     ScheduleDecorate()
     -- Filter card is bound to this window: re-show it with the browser
     -- whenever filters are on.
@@ -1016,7 +1019,13 @@ local M = {
     "LFG_LIST_UPDATE_SEARCH_RESULTS", "PLAYER_ENTERING_WORLD",
   },
   OnLoad = function()
-    MDB()
+    local db = MDB()
+    -- One-time migration: the inspect block shipped Shift-only, but plain
+    -- hover is the expected (LFG Inspect) behavior - flip stored defaults.
+    if db._inspectHoverV2 ~= true then
+      db._inspectHoverV2 = true
+      if db.inspectShiftOnly == true then db.inspectShiftOnly = false end
+    end
     InstallApplyHook()
     EnsureHooks()
   end,
