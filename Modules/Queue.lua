@@ -415,7 +415,7 @@ local M = {
   status = "alpha",
   defaultEnabled = true,
   events = {
-    "LFG_PROPOSAL_SHOW", "UPDATE_BATTLEFIELD_STATUS",
+    "LFG_QUEUE_STATUS_UPDATE", "LFG_PROPOSAL_SHOW", "UPDATE_BATTLEFIELD_STATUS",
     "LFG_LIST_APPLICATION_STATUS_UPDATED", "GROUP_ROSTER_UPDATE",
   },
   OnLoad = function()
@@ -438,7 +438,10 @@ local M = {
   OnEvent = function(_, event, ...)
     local arg1 = ...
     InitRoleCheckHook() -- LFD UI is load-on-demand; cheap + idempotent
-    if event == "UPDATE_BATTLEFIELD_STATUS" then
+    if event == "LFG_QUEUE_STATUS_UPDATE" then
+      -- The real queue-status event on Midnight (UPDATE_STATUS is gone).
+      EvaluateQueue()
+    elseif event == "UPDATE_BATTLEFIELD_STATUS" then
       -- Battleground "confirm" = queue popped.
       local ok, status, mapName = pcall(GetBattlefieldStatus, arg1 or 1)
       if ok and status == "confirm" then

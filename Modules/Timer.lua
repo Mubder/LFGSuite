@@ -158,9 +158,10 @@ end
 -- inside an M+ party.
 local function TrackDeathCLEU()
   if not state.active then return end
-  if not CombatLogGetCurrentEventInfo then return end
-  local ok, _, subevent, _, _, _, _, _, destGUID, destName =
-    pcall(CombatLogGetCurrentEventInfo)
+  local getter = (C_CombatLog and C_CombatLog.GetCurrentEventInfo)
+    or CombatLogGetCurrentEventInfo
+  if type(getter) ~= "function" then return end
+  local ok, _, subevent, _, _, _, _, _, destGUID, destName = pcall(getter)
   if not ok or subevent ~= "UNIT_DIED" then return end
   if not (type(destGUID) == "string" and destGUID:find("^Player-")) then return end
   local short = type(destName) == "string" and Util.ShortName(destName) or nil
@@ -199,12 +200,15 @@ local function EnsureDeathFeed()
   if deathFeedTried then return end
   deathFeedTried = true
   local f = CreateFrame("Frame")
-  -- Only the *_UNTRUSTED variant is addon-registerable; plain
-  -- COMBAT_LOG_EVENT is PROTECTED and attempting it fires
-  -- ADDON_ACTION_FORBIDDEN, so it is never probed.
-  if pcall(f.RegisterEvent, f, "COMBAT_LOG_EVENT_UNTRUSTED") then
-    f:SetScript("OnEvent", function() TrackDeathCLEU() end)
-    return
+  -- Midnight renamed the combat-log event: Blizzard's own CombatLog addon
+  -- registers COMBAT_LOG_MESSAGE now; older clients use the *_UNTRUSTED
+  -- variant. Plain COMBAT_LOG_EVENT is PROTECTED and never probed (it fires
+  -- ADDON_ACTION_FORBIDDEN).
+  for _, ev in ipairs({ "COMBAT_LOG_MESSAGE", "COMBAT_LOG_EVENT_UNTRUSTED" }) do
+    if pcall(f.RegisterEvent, f, ev) then
+      f:SetScript("OnEvent", function() TrackDeathCLEU() end)
+      return
+    end
   end
   -- No combat-log feed on this client: poll alive->dead transitions (2Hz,
   -- only meaningful during runs; guard inside PollDeaths).
