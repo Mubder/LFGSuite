@@ -60,7 +60,7 @@ function NS.BuildMinimapButton()
     self:StopMovingOrSizing()
     self:SetScript("OnUpdate", nil)
   end)
-  mmButton:SetScript("OnClick", function(_, button)
+  mmButton:SetScript("OnClick", function(self, button)
     if button == "LeftButton" then
       if NS.IsModuleEnabled and NS.IsModuleEnabled("keystones") and NS.ToggleKeysWindow then
         NS.ToggleKeysWindow()
@@ -69,14 +69,57 @@ function NS.BuildMinimapButton()
         if okC and id then pcall(Settings.OpenToCategory, id) end
       end
     else
-      SlashCmdList["LFGSUITE"]("modules")
+      -- Right-click: quick access to every module window (many are invisible
+      -- until their content triggers - especially the applicant queue log).
+      local function openKeys()
+        if NS.ToggleKeysWindow then NS.ToggleKeysWindow(true) end
+      end
+      local function openApplicants()
+        if NS.A and NS.A.ToggleLogUI then NS.A.ToggleLogUI(true) end
+      end
+      local function openLoot()
+        if NS.ToggleLootWindow then NS.ToggleLootWindow(true) end
+      end
+      local function openRoster()
+        if NS.ToggleRosterWindow then NS.ToggleRosterWindow(true) end
+      end
+      local function openConfig()
+        if Settings and Settings.OpenToCategory and NS._settingsCategory then
+          local okC, id = pcall(function() return NS._settingsCategory:GetID() end)
+          if okC and id then pcall(Settings.OpenToCategory, id) end
+        end
+      end
+      if MenuUtil and MenuUtil.CreateContextMenu then
+        MenuUtil.CreateContextMenu(self, function(_, root)
+          root:CreateTitle("LFG Suite")
+          root:CreateButton(l("mm_keys", "Keystones"), openKeys)
+          root:CreateButton(l("mm_queue_log", "Applicant queue log (LFGAlert)"), openApplicants)
+          root:CreateButton(l("mm_loot", "Loot Planner"), openLoot)
+          root:CreateButton(l("mm_roster", "Alt Roster"), openRoster)
+          root:CreateDivider()
+          root:CreateButton(l("mm_config", "Settings"), openConfig)
+        end)
+      else
+        if not LFGSuiteMinimapMenu then
+          CreateFrame("Frame", "LFGSuiteMinimapMenu", UIParent, "UIDropDownMenuTemplate")
+        end
+        EasyMenu({
+          { text = "LFG Suite", isTitle = true, notCheckable = true },
+          { text = l("mm_keys", "Keystones"), notCheckable = true, func = openKeys },
+          { text = l("mm_queue_log", "Applicant queue log (LFGAlert)"), notCheckable = true, func = openApplicants },
+          { text = l("mm_loot", "Loot Planner"), notCheckable = true, func = openLoot },
+          { text = l("mm_roster", "Alt Roster"), notCheckable = true, func = openRoster },
+          { text = " ", notCheckable = true, disabled = true },
+          { text = l("mm_config", "Settings"), notCheckable = true, func = openConfig },
+        }, LFGSuiteMinimapMenu, self, -20, 0, "MENU")
+      end
     end
   end)
   mmButton:SetScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, "ANCHOR_LEFT")
     GameTooltip:SetText("LFG Suite")
     GameTooltip:AddLine(l("mm_open", "Left-click: keystones window (settings if module off)"), 1, 1, 1)
-    GameTooltip:AddLine(l("mm_modules", "Right-click: list modules in chat"), 1, 1, 1)
+    GameTooltip:AddLine(l("mm_windows", "Right-click: open any module window"), 1, 1, 1)
     GameTooltip:AddLine(l("mm_drag", "Drag: move minimap icon"), 0.7, 0.7, 0.7)
     GameTooltip:Show()
   end)

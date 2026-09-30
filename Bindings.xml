@@ -1,5 +1,8 @@
 <Bindings>
-  <Binding name="LFGSUITE_BROWSEREFRESH" header="LFGSUITE">
+  <!-- Modern format: header sections come from BINDING_HEADER_* globals set in
+       Lua (Browser.lua); the old standalone header="..." attribute is no
+       longer recognized by the client XML parser. -->
+  <Binding name="LFGSUITE_BROWSEREFRESH" category="BINDING_HEADER_LFGSUITE">
     LFGSuite.BrowserRefresh()
   </Binding>
 </Bindings>

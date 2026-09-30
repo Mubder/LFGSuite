@@ -42,7 +42,9 @@ local function ProbeForcesCriteria()
   if not C_Scenario then return nil, nil end
   local okStep, _, _, numCriteria = pcall(C_Scenario.GetStepInfo)
   if not (okStep and type(numCriteria) == "number" and numCriteria > 0) then return nil, nil end
-  for i = 1, numCriteria do
+  -- Clamp: a renamed/shifted return shape must never turn this probe into a
+  -- million-iteration loop that freezes the client mid-run.
+  for i = 1, math.min(numCriteria, 64) do
     local okC, criteriaString, criteriaType, completed, quantity, totalQuantity =
       pcall(C_Scenario.GetCriteriaInfo, i)
     if okC and type(totalQuantity) == "number" and totalQuantity >= 100 and totalQuantity <= 600 then

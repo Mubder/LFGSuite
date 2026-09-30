@@ -72,16 +72,38 @@ function Util.CleanKString(s)
   return cleaned
 end
 
+-- UTF-8 safe truncation with ellipsis: "Twisting Nether" -> "Twisting N…".
+function Util.Trunc(s, n)
+  if not s or s == "" or #s <= n then return s end
+  local cut = s:sub(1, n - 1)
+  cut = cut:gsub("[\194-\244][\128-\191]*$", "") -- don't cut mid multi-byte char
+  return cut .. "…"
+end
+
 -- Dungeon name for a challenge (keystone) mapID; returns which lookup worked.
+-- Results are cached per session: callers (keystone window refresh on every
+-- comms message, roster, timer) resolve the same handful of mapIDs over and
+-- over, and each lookup is a protected pcall pair. Names never change at
+-- runtime, so the cache needs no invalidation.
+local mapNameCache = {}
 function Util.GetChallengeMapName(mapID)
   if not mapID or not C_ChallengeMode then return nil end
+  local cached = mapNameCache[mapID]
+  if cached ~= nil then
+    if cached == false then return nil end
+    return cached[1], cached[2]
+  end
   for _, fn in ipairs({ "GetMapInfo", "GetMapUIInfo" }) do
     local f = C_ChallengeMode[fn]
     if type(f) == "function" then
       local ok, name = pcall(f, mapID)
-      if ok and type(name) == "string" and name ~= "" then return name, fn end
+      if ok and type(name) == "string" and name ~= "" then
+        mapNameCache[mapID] = { name, fn }
+        return name, fn
+      end
     end
   end
+  mapNameCache[mapID] = false
   return nil
 end
 

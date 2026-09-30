@@ -68,6 +68,8 @@ local function LockoutList()
   if not (GetNumSavedInstances and GetSavedInstanceInfo) then return nil end
   local okN, n = pcall(GetNumSavedInstances)
   if not (okN and type(n) == "number") then return nil end
+  -- Clamp: never trust an unbounded count from a potentially renamed API.
+  n = math.min(n, 200)
   local out = {}
   for i = 1, n do
     -- returns: name, lockoutId, resets, difficulty, locked, extended, ...,
@@ -193,6 +195,7 @@ local function BuildUI()
   frame:SetPoint("CENTER")
   frame:SetMovable(true)
   frame:EnableMouse(true)
+  frame:RegisterForDrag("LeftButton")
   frame:SetClampedToScreen(true)
   frame:SetFrameStrata("HIGH")
   frame:SetBackdrop({

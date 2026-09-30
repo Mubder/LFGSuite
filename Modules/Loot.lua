@@ -171,7 +171,8 @@ local function LootForEncounter(encID)
     if pcall(EJ_SelectEncounter, encID) then
       local okN, n = pcall(EJ_GetNumLoot)
       if okN and type(n) == "number" then
-        for i = 1, n do
+        -- Clamp: a shifted API shape must not turn this into a freeze.
+        for i = 1, math.min(n, 500) do
           local okL, li = pcall(EJ_GetLootInfo, i)
           if okL and type(li) == "table" then
             out[#out + 1] = li
@@ -296,6 +297,7 @@ local function BuildUI()
   frame:SetPoint("CENTER")
   frame:SetMovable(true)
   frame:EnableMouse(true)
+  frame:RegisterForDrag("LeftButton")
   frame:SetClampedToScreen(true)
   frame:SetFrameStrata("HIGH")
   frame:SetBackdrop({

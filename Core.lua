@@ -10,7 +10,7 @@ LFGSuite = LFGSuite or {}
 local NS = LFGSuite
 local L = NS.L or {} -- from Locales\enUS.lua (loaded first per .toc)
 local function l(key, fallback) return L[key] or fallback end
-NS.BUILD = 5 -- bump every shipment; shown in load message + window titles
+NS.BUILD = 7 -- bump every shipment; shown in load message + window titles
 
 -- ---------------------------------------------------------------------------
 -- Defaults / DB
@@ -191,10 +191,17 @@ function NS.SyncEventRegistrations()
   end
   for ev in pairs(wanted) do
     if not registeredEvents[ev] then
-      -- pcall: a module may list an event Blizzard renamed/removed - it must
-      -- not break the bus, it just never fires.
-      local ok = pcall(eventFrame.RegisterEvent, eventFrame, ev)
-      if ok then registeredEvents[ev] = true end
+      -- A module may list an event Blizzard renamed/removed - it must not
+      -- break the bus, but swallow it SILENTLY and nobody notices the
+      -- module went deaf (exactly what shipped the browser module in
+      -- builds 1-5). Report it once via the module error channel.
+      local ok, err = pcall(eventFrame.RegisterEvent, eventFrame, ev)
+      if ok then
+        registeredEvents[ev] = true
+      else
+        NS.ModuleError({ key = "events" },
+          "cannot register unknown event '" .. tostring(ev) .. "'")
+      end
     end
   end
   for ev in pairs(registeredEvents) do
@@ -296,5 +303,14 @@ SlashCmdList["LFGSUITE"] = function(msg)
     print("  " .. l("help_modules", "/lfgs modules - list modules & status"))
     print("  " .. l("help_module_toggle", "/lfgs <module> on|off - e.g. /lfgs keystones on"))
     print("  " .. l("help_version", "/lfgs version - build info"))
+    if NS.SlashHandlers then
+      local subs = {}
+      for cmd in pairs(NS.SlashHandlers) do subs[#subs + 1] = cmd end
+      if #subs > 0 then
+        table.sort(subs)
+        print("  " .. l("help_subcommands", "/lfgs <%s> - module windows & tools")
+          :format(table.concat(subs, "|")))
+      end
+    end
   end
 end

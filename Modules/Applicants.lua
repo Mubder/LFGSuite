@@ -215,7 +215,10 @@ local function SnapshotApplicant(applicantID, cachedListing, rioMemo)
   local infoOk, appInfo = pcall(C_LFGList.GetApplicantInfo, applicantID)
   if not infoOk or not appInfo then return nil end
   local members = {}
-  local numMembers = appInfo.numMembers or 1
+  -- Clamp: a renamed/misbehaving API must never turn this into a million-
+  -- iteration loop that freezes the client (applicant parties are <= 5).
+  local numMembers = math.min(tonumber(appInfo.numMembers) or 1, 40)
+  if numMembers < 1 then numMembers = 1 end
   for i = 1, numMembers do
     local mOk, name, class, locClass, level, itemLevel, honorLevel,
       tank, healer, damage, assignedRole, relationship,
@@ -739,6 +742,13 @@ local function HandleApplicantSnapshot(applicantID, snap, reason)
   end
 end
 
+-- Scan coalescing state (locals shared by ScanApplicants / QueueScan /
+-- A.Rescan below). Declared up front: Lua locals must exist before use.
+local scanPending = false
+local scanReason = "list"
+local scanRetryN = 0
+local QueueScan -- forward declaration; defined after ScanApplicants
+
 local function ScanApplicants(reason, retryN)
   if not NS.IsModuleEnabled("applicants") then return end
   if LFGAlertActive() then NoteInterop() return end
@@ -775,13 +785,36 @@ local function ScanApplicants(reason, retryN)
   end
 
   retryN = retryN or 0
-  if missingData and retryN < 4 and HasActiveListing() then
-    C_Timer.After(2, function() ScanApplicants(reason, retryN + 1) end)
+  -- The missing-data retry folds into the shared coalesced scan (QueueScan
+  -- below): one chain total, never one per event. A fresher event arriving
+  -- during the wait resets the pending scan instead of stacking another.
+  if missingData and retryN < 4 and HasActiveListing() and not scanPending then
+    QueueScan(reason, retryN + 1, 2)
   end
 end
 
+-- Coalesced scanning: applicant events arrive in bursts (one per applicant
+-- plus list updates), and every burst used to schedule its own full scan plus
+-- its own 4-deep missing-data retry chain - O(events x applicants x retries)
+-- API calls that hitched the client on busy listings. Now at most one scan is
+-- ever pending: concurrent events fold into it, and the missing-data retry is
+-- a single shared chain (scanRetryN preserves the escalation depth).
+QueueScan = function(reason, retryN, delay)
+  scanReason = reason or scanReason or "list"
+  retryN = retryN or 0
+  if retryN > scanRetryN then scanRetryN = retryN end
+  if scanPending then return end
+  scanPending = true
+  C_Timer.After(delay or 0.5, function()
+    scanPending = false
+    local rn = scanRetryN
+    scanRetryN = 0
+    ScanApplicants(scanReason, rn)
+  end)
+end
+
 function A.Rescan(reason)
-  C_Timer.After(0.5, function() ScanApplicants(reason or "list", 0) end)
+  QueueScan(reason or "list", 0, 0.5)
 end
 
 function A.WipeKnown(reasonLabel)
@@ -887,7 +920,20 @@ local function ImportFromLFGAlert()
   for _, f in ipairs(fields) do
     if src[f] ~= nil then db[f] = src[f] end
   end
-  if type(src.log) == "table" then db.log = src.log end
+  if type(src.log) == "table" then
+    -- Bound the import: an old LFGAlert log can hold thousands of entries and
+    -- every log refresh iterates all of them (plus the first AddLogEntry pays
+    -- an O(n^2) TrimLog). Keep the newest maxLogEntries in O(n).
+    local maxN = tonumber(db.maxLogEntries) or 300
+    if maxN < 50 then maxN = 50 end
+    if #src.log > maxN then
+      local keep = {}
+      for i = #src.log - maxN + 1, #src.log do keep[#keep + 1] = src.log[i] end
+      db.log = keep
+    else
+      db.log = src.log
+    end
+  end
   if type(src.stats) == "table" then db.stats = src.stats end
   NS.Print(string.format(l("import_done_fmt", "Imported LFGAlert settings, log (%d entries) and stats."),
     #(src.log or {})))
@@ -950,24 +996,10 @@ local M = {
           end
           HandleApplicantSnapshot(applicantID, snap, "updated")
           if not SnapHasData(snap) then
-            local prev = known[applicantID]
-            if prev then
-              local n = (prev.retries or 0) + 1
-              prev.retries = n
-              if n <= 4 then
-                C_Timer.After(2, function()
-                  if LFGAlertActive() or not HasActiveListing() then return end
-                  local s2 = SnapshotApplicant(applicantID)
-                  if s2 then
-                    local p2 = known[applicantID]
-                    if p2 then p2.snap = s2 end
-                    BackfillLogEntry(applicantID, s2)
-                  elseif not IsApplicantPresent(applicantID) then
-                    HandleApplicantGone(applicantID)
-                  end
-                end)
-              end
-            end
+            -- Member data not ready yet: fold the backfill into the shared
+            -- coalesced scan instead of spawning a private retry chain per
+            -- applicant (K applicants x 4 retries of escalating timers).
+            QueueScan("updated", 0, 2)
           end
         end)
       else
@@ -985,7 +1017,7 @@ local M = {
         A.WipeKnown("ended")
       end
     elseif event == "PLAYER_ENTERING_WORLD" then
-      C_Timer.After(2, function() ScanApplicants("login") end)
+      QueueScan("login", 0, 2)
     end
   end,
   OnOptions = function(ctx)

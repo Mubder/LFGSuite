@@ -5,16 +5,27 @@
 --
 -- Feature checklist:
 --   [x] Listing age tag per row ("2m") - hidden if Premade Sort is loaded
---   [x] Key level tag parsed from listing title ("+7")
---   [x] Leader M+ score tag (leaderOverallDungeonScore when Blizzard provides it)
+--   [x] Key level tag parsed from listing title ("+7") - only when Midnight's
+--       kstring wrapping leaves the title readable (degrades silently)
+--   [x] Leader realm tag from partyGUID (the practical "region" info; hidden
+--       when the leader is on your own realm)
+--   [x] Leader M+ score tag (leaderOverallDungeonScore, Blizzard rarity color)
+--   [x] Tag on the row's playstyle line (3rd line) - clear of the title,
+--       dungeon name and the 125px class/role icon block; realms truncated
 --   [x] Double-click a listing to sign up with remembered roles
 --   [x] Role memory: captured from every signup via ApplyToGroup hook
 --       (works for our double-click AND Blizzard's own signup dialog)
 --   [x] Refresh: /lfgs refresh + keybind (Bindings.xml)
 --   [x] Resilience: ScrollBox/row-field probes across client generations,
 --       per-row pcall guards, /lfgs browse diagnostics
+--   NOTE on events: the Group Finder fires LFG_LIST_SEARCH_RESULTS_RECEIVED
+--   (each search completes), LFG_LIST_SEARCH_RESULT_UPDATED (one result
+--   changed, payload = searchResultID) and LFG_LIST_UPDATE_SEARCH_RESULTS.
+--   There is NO LFG_LIST_SEARCH_RESULTS_UPDATED event - registering it fails
+--   silently (unknown event) and the module never decorated anything.
 --   [ ] Sort listings by age (deferred: ScrollBox reordering is fragile)
---   [ ] Region tags (Premade Regions) - phase 2
+--   [x] Leader realm tag shipped above (Premade Regions' core value); full
+--       datacenter-region mapping stays phase 2
 --   [ ] Filter panel + expression language - phase 2
 --   [ ] Listing tooltip enrichment (members/comp/ignore) - phase 2
 --   [ ] Role pre-selection on Blizzard's signup dialog (needs dialog internals)
@@ -83,6 +94,34 @@ local function GetListingAge(info)
   return nil
 end
 
+-- Leader's realm (the practical "region" info: within a region the Group
+-- Finder is region-wide, so what distinguishes listings is which realm the
+-- leader is from). Midnight wraps player names in unreadable kstrings, but
+-- the partyGUID stays readable: GetPlayerInfoByGUID yields the plain realm.
+local function GetLeaderRealm(info)
+  if type(info) ~= "table" then return nil end
+  if type(info.partyGUID) == "string" and GetPlayerInfoByGUID then
+    local ok, _, _, _, _, _, _, realm = pcall(GetPlayerInfoByGUID, info.partyGUID)
+    if ok and type(realm) == "string" and realm ~= "" then return realm end
+  end
+  local ln = Util.CleanKString(info.leaderName or "")
+  local realm = ln:match("-(.+)$")
+  if realm and realm ~= "" then return realm end
+  return nil
+end
+
+-- Same rarity coloring Blizzard uses in the listing tooltip.
+local function ColorScore(score)
+  if C_ChallengeMode and C_ChallengeMode.GetDungeonScoreRarityColor then
+    local ok, c = pcall(C_ChallengeMode.GetDungeonScoreRarityColor, score)
+    if ok and type(c) == "table" then
+      if c.WrapTextInColorCode then return c:WrapTextInColorCode(tostring(score)) end
+      if type(c.colorStr) == "string" then return "|c" .. c.colorStr .. tostring(score) .. "|r" end
+    end
+  end
+  return "|cff55ff55" .. tostring(score) .. "|r"
+end
+
 local function RowTag(info)
   local db = MDB()
   if db.tags == false then return nil end
@@ -98,8 +137,14 @@ local function RowTag(info)
   local title = Util.CleanKString((info.name or "") .. " " .. (info.comment or ""))
   local keyLevel = Util.ParseKeyLevel(title)
   if keyLevel then parts[#parts + 1] = "|cffffd100+" .. keyLevel .. "|r" end
+  local myRealm = (GetRealmName() or ""):gsub("%s", "")
+  local realm = GetLeaderRealm(info)
+  if realm then realm = Util.Trunc(realm:gsub("%s", ""), 10) end
+  if realm and realm ~= "" and realm:lower() ~= myRealm:lower() then
+    parts[#parts + 1] = "|cff9ec1e8" .. realm .. "|r"
+  end
   local score = GetLeaderScore(info)
-  if score then parts[#parts + 1] = "|cff55ff55" .. tostring(math.floor(score)) .. "|r" end
+  if score then parts[#parts + 1] = ColorScore(score) end
   if #parts == 0 then return nil end
   return table.concat(parts, " ")
 end
@@ -126,12 +171,18 @@ local function GetResultID(b)
     local ok, v = pcall(b.GetResultID, b)
     if ok and type(v) == "number" and v > 0 then return v end
   end
-  if type(b.GetData) == "function" then
-    local ok, d = pcall(b.GetData, b)
-    if ok and type(d) == "table" then
-      for _, k in ipairs({ "resultID", "listingID", "searchResultID", "id", "ID" }) do
-        local v = d[k]
-        if type(v) == "number" and v > 0 then return v end
+  -- ScrollBox rows carry their data via GetElementData(); for search results
+  -- the element is { resultID = <id> }.
+  for _, getter in ipairs({ "GetElementData", "GetData" }) do
+    if type(b[getter]) == "function" then
+      local ok, d = pcall(b[getter], b)
+      if ok and type(d) == "table" then
+        for _, k in ipairs({ "resultID", "listingID", "searchResultID", "id", "ID" }) do
+          local v = d[k]
+          if type(v) == "number" and v > 0 then return v end
+        end
+      elseif ok and type(d) == "number" and d > 0 then
+        return d
       end
     end
   end
@@ -238,6 +289,70 @@ function NS.BrowserSignup(resultID)
   end
 end
 
+-- Decorates one row. Returns "tagged", "id" (had a resultID), "err" or nil so
+-- the batch pass and /lfgs browse diagnostics can count outcomes.
+local function DecorateRow(b)
+  if type(b) ~= "table" then return nil end
+  if not (C_LFGList and C_LFGList.GetSearchResultInfo) then return nil end
+  local okRow, resultID = pcall(GetResultID, b)
+  if not okRow then resultID = nil end
+  if not resultID then return nil end
+  local okI, info = pcall(C_LFGList.GetSearchResultInfo, resultID)
+  if not (okI and type(info) == "table") then return "err" end
+  local okTag, tag = pcall(RowTag, info)
+  if not okTag then tag = nil end
+  if tag then
+    if not b._lfgsTag then
+      local okF, fs = pcall(b.CreateFontString, b, nil, "OVERLAY", "GameFontHighlightSmall")
+      if okF and fs then
+        -- The row's third line (Playstyle: "Relaxed/Competitive", usually
+        -- short or empty) is the only reliably free space - the title and
+        -- activity lines span the middle, and the class/role icon block
+        -- alone is 125px wide. Sit the tag right after the playstyle text.
+        local anchored = false
+        if b.Playstyle then
+          anchored = pcall(fs.SetPoint, fs, "LEFT", b.Playstyle, "RIGHT", 10, 0)
+        end
+        if not anchored and b.DataDisplay then
+          anchored = pcall(fs.SetPoint, fs, "RIGHT", b.DataDisplay, "LEFT", -8, 0)
+        end
+        if not anchored then
+          pcall(fs.SetPoint, fs, "BOTTOMLEFT", b, "BOTTOMLEFT", 10, 6)
+        end
+        pcall(fs.SetJustifyH, fs, "LEFT")
+        b._lfgsTag = fs
+      end
+    end
+    if b._lfgsTag then
+      pcall(b._lfgsTag.SetText, b._lfgsTag, tag)
+      pcall(b._lfgsTag.Show, b._lfgsTag)
+    end
+    return "tagged"
+  end
+  if b._lfgsTag then pcall(b._lfgsTag.Hide, b._lfgsTag) end
+  return "id"
+end
+
+local function InstallDoubleClick(b)
+  if b._lfgsDC or type(b.HookScript) ~= "function" then return end
+  b._lfgsDC = true
+  pcall(b.HookScript, b, "OnMouseUp", function(self, mouseBtn)
+    if mouseBtn ~= "LeftButton" then return end
+    local db = MDB()
+    if db.doubleClick == false then return end
+    local now = GetTime()
+    if self._lfgsLastClick and (now - self._lfgsLastClick) < 0.35 then
+      self._lfgsLastClick = nil
+      local rid = GetResultID(self)
+      if rid then
+        NS.BrowserSignup(rid)
+      end
+    else
+      self._lfgsLastClick = now
+    end
+  end)
+end
+
 local function DecorateRows()
   local dbg = NS._browserDebug
   if not (LFGListFrame and LFGListFrame.SearchPanel or GroupFinderFrame and GroupFinderFrame.SearchPanel) then return end
@@ -247,55 +362,13 @@ local function DecorateRows()
   dbg.frames = #buttons
   local withID, tagged, errors = 0, 0, 0
   for _, b in ipairs(buttons) do
-    local okRow, resultID = pcall(GetResultID, b)
-    if not okRow then resultID = nil end
-    if resultID then
-      withID = withID + 1
-      local okI, info = pcall(C_LFGList.GetSearchResultInfo, resultID)
-      if okI and type(info) == "table" then
-        local okTag, tag = pcall(RowTag, info)
-        if not okTag then
-          errors = errors + 1
-          tag = nil
-        end
-        if tag then
-          tagged = tagged + 1
-          if not b._lfgsTag then
-            local okF, fs = pcall(b.CreateFontString, b, nil, "OVERLAY", "GameFontHighlightSmall")
-            if okF and fs then
-              pcall(fs.SetPoint, fs, "RIGHT", b, "RIGHT", -96, 0)
-              b._lfgsTag = fs
-            end
-          end
-          if b._lfgsTag then
-            pcall(b._lfgsTag.SetText, b._lfgsTag, tag)
-            pcall(b._lfgsTag.Show, b._lfgsTag)
-          end
-        elseif b._lfgsTag then
-          pcall(b._lfgsTag.Hide, b._lfgsTag)
-        end
-      else
-        errors = errors + 1
-      end
-    end
+    local res = DecorateRow(b)
+    if res == "tagged" or res == "id" then withID = withID + 1 end
+    if res == "tagged" then tagged = tagged + 1 end
+    if res == "err" then errors = errors + 1 end
     -- Double-click signup (own timestamp detection; no click re-registration).
-    if MDB().doubleClick ~= false and not b._lfgsDC and type(b.HookScript) == "function" then
-      b._lfgsDC = true
-      pcall(b.HookScript, b, "OnMouseUp", function(self, mouseBtn)
-        if mouseBtn ~= "LeftButton" then return end
-        local db = MDB()
-        if db.doubleClick == false then return end
-        local now = GetTime()
-        if self._lfgsLastClick and (now - self._lfgsLastClick) < 0.35 then
-          self._lfgsLastClick = nil
-          local rid = GetResultID(self)
-          if rid then
-            NS.BrowserSignup(rid)
-          end
-        else
-          self._lfgsLastClick = now
-        end
-      end)
+    if MDB().doubleClick ~= false then
+      InstallDoubleClick(b)
     end
   end
   dbg.withID, dbg.tagged, dbg.errors = withID, tagged, errors
@@ -367,13 +440,39 @@ NS.SlashHandlers.refresh = function() NS.BrowserRefresh() end
 
 -- ---------------------------------------------------------------------------
 -- Lazy hooks: Blizzard's Group Finder is load-on-demand, so at our
--- ADDON_LOADED the frames may not exist yet. Re-run on login; hook OnShow
--- so opening the window always triggers a decoration pass.
+-- ADDON_LOADED / PLAYER_ENTERING_WORLD the frames do not exist yet. Every
+-- relevant event (and /lfgs browse) re-runs EnsureHooks; once the Blizzard
+-- addon is in, we hook its OnShow AND the global row updater - the ScrollBox
+-- pools and reuses row buttons while scrolling, so the updater hook is what
+-- keeps each row's tag correct.
 -- ---------------------------------------------------------------------------
 
 local hooksInstalled = false
+local rowHookInstalled = false
+
+local function InstallRowUpdateHook()
+  if rowHookInstalled then return true end
+  if type(LFGListSearchEntry_Update) ~= "function" then return false end
+  local ok = pcall(hooksecurefunc, "LFGListSearchEntry_Update", function(b)
+    -- pcall: an error inside a secure hook would otherwise surface inside
+    -- Blizzard's own row updater.
+    local okR, err = pcall(function()
+      DecorateRow(b)
+      if MDB().doubleClick ~= false then
+        InstallDoubleClick(b)
+      end
+    end)
+    if not okR and NS.ModuleError then NS.ModuleError({ key = "browser" }, err) end
+  end)
+  if ok then
+    rowHookInstalled = true
+    NS._browserDebug.rowHook = true
+  end
+  return ok
+end
 
 local function EnsureHooks()
+  InstallRowUpdateHook()
   if hooksInstalled then return end
   local lfg = LFGListFrame or GroupFinderFrame
   if type(lfg) ~= "table" or type(lfg.HookScript) ~= "function" then return end
@@ -393,8 +492,8 @@ NS.SlashHandlers.browse = function()
       NS.IsModuleEnabled("browser") and "ON" or "OFF",
       db.tags ~= false and "ON" or "OFF",
       db.doubleClick ~= false and "ON" or "OFF"))
-    print(string.format("  event=%s strategy=%s frames=%s withID=%s tagged=%s errors=%s",
-      tostring(dbg.lastEvent), tostring(dbg.strategy),
+    print(string.format("  event=%s strategy=%s rowHook=%s frames=%s withID=%s tagged=%s errors=%s",
+      tostring(dbg.lastEvent), tostring(dbg.strategy), tostring(dbg.rowHook and "yes" or "no"),
       tostring(dbg.frames), tostring(dbg.withID),
       tostring(dbg.tagged), tostring(dbg.errors)))
     if (dbg.frames or 0) == 0 then
@@ -418,7 +517,13 @@ local M = {
   phase = 1,
   status = "alpha",
   defaultEnabled = true,
-  events = { "LFG_LIST_SEARCH_RESULTS_UPDATED", "PLAYER_ENTERING_WORLD" },
+  events = {
+    -- Real Group Finder events (see header note): RECEIVED fires for every
+    -- completed search, RESULT_UPDATED for single-listing changes,
+    -- UPDATE_SEARCH_RESULTS when Blizzard reshuffles the result list.
+    "LFG_LIST_SEARCH_RESULTS_RECEIVED", "LFG_LIST_SEARCH_RESULT_UPDATED",
+    "LFG_LIST_UPDATE_SEARCH_RESULTS", "PLAYER_ENTERING_WORLD",
+  },
   OnLoad = function()
     MDB()
     InstallApplyHook()
@@ -431,8 +536,10 @@ local M = {
   end,
   OnEvent = function(_, event)
     NS._browserDebug.lastEvent = event
+    -- Cheap + idempotent: the Group Finder UI is load-on-demand, so the
+    -- hooks usually only become installable after the first event.
+    EnsureHooks()
     if event == "PLAYER_ENTERING_WORLD" then
-      EnsureHooks()
       return
     end
     ScheduleDecorate()

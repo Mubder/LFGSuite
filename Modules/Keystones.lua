@@ -39,6 +39,7 @@ local ownLevel, ownMapID
 local party = {} -- session: [fullName] = { level, mapID, class, t }
 local weAutoOpened = false
 local tooltipHooked, receptacleFrame, lastReplyT
+local rosterSyncPending = false -- GROUP_ROSTER_UPDATE arrives in bursts; one delayed sync max
 
 local function MDB() return NS.EnsureModuleDB("keystones", KEYS_DEFAULTS) end
 
@@ -63,14 +64,45 @@ local function ProbeOwnKey()
   if okL and okM and lvl and mapID and lvl >= 2 then return lvl, mapID end
 end
 
+-- "|Hkeystone:itemID:mapID:level:..." -> level, mapID
+local function ParseKeystoneLink(link)
+  local payload = link:match("|Hkeystone:(.-)|h")
+  if not payload then return nil end
+  local _, mapStr, lvlStr = strsplit(":", payload)
+  local mapID, level = tonumber(mapStr), tonumber(lvlStr)
+  if mapID and level and level >= 2 and level <= 40 then return level, mapID end
+  return nil
+end
+
+-- Fallback: the owned-keystone APIs can report nothing while a freshly looted
+-- key is still settling; the bag link is always authoritative.
+local function ProbeOwnKeyFromBags()
+  if not (C_Container and C_Container.GetContainerItemLink) then return nil end
+  for bag = 0, (NUM_BAG_SLOTS or 4) do
+    local okN, slots = pcall(C_Container.GetContainerNumSlots, bag)
+    if okN and type(slots) == "number" and slots > 0 then
+      -- Clamp: a misbehaving slot count must not become a bag-scan freeze.
+      for slot = 1, math.min(slots, 64) do
+        local okL, link = pcall(C_Container.GetContainerItemLink, bag, slot)
+        if okL and type(link) == "string" and link:find("|Hkeystone:", 1, true) then
+          local level, mapID = ParseKeystoneLink(link)
+          if level then return level, mapID end
+        end
+      end
+    end
+  end
+end
+
 local function RefreshOwn()
   local lvl, mapID = ProbeOwnKey()
+  if not lvl then lvl, mapID = ProbeOwnKeyFromBags() end
   local changed = (lvl ~= ownLevel) or (mapID ~= ownMapID)
   ownLevel, ownMapID = lvl, mapID
   return changed
 end
 
 local function RecordAlt()
+  if not ownLevel then return end -- don't seed junk "no key" alt records
   local db = MDB()
   local _, class = UnitClass("player")
   db.alts[MyFullName()] = { level = ownLevel, mapID = ownMapID, class = class, t = time() }
@@ -154,6 +186,7 @@ local function PruneParty()
   end
   local keep = {}
   local n = GetNumGroupMembers and GetNumGroupMembers() or 0
+  n = math.min(tonumber(n) or 0, 40)
   for i = 1, n do
     local name = GetRaidRosterInfo and GetRaidRosterInfo(i)
     name = NormalizeFullName(name)
@@ -172,8 +205,8 @@ local function FindKeystoneInBags()
   if not (C_Container and C_Container.GetContainerNumSlots) then return nil end
   for bag = 0, 4 do
     local okN, slots = pcall(C_Container.GetContainerNumSlots, bag)
-    if okN and slots then
-      for slot = 1, slots do
+    if okN and type(slots) == "number" and slots > 0 then
+      for slot = 1, math.min(slots, 64) do
         local okL, link = pcall(C_Container.GetContainerItemLink, bag, slot)
         if okL and type(link) == "string" and link:find("|Hkeystone:", 1, true) then
           return bag, slot
@@ -281,6 +314,7 @@ function NS.RefreshKeysUI()
   local aff = NS.Affixes.Summary()
   frame.affixLine:SetText(aff and (l("affixes_lbl", "Affixes: ") .. aff) or "")
   local data = BuildRows()
+  if frame.emptyHint then frame.emptyHint:SetShown(#data == 0) end
   FauxScrollFrame_Update(scroll, #data, ROWS_VISIBLE, ROW_H)
   local offset = FauxScrollFrame_GetOffset(scroll)
   for i = 1, ROWS_VISIBLE do
@@ -311,6 +345,7 @@ local function BuildUI()
   frame:SetPoint("CENTER")
   frame:SetMovable(true)
   frame:EnableMouse(true)
+  frame:RegisterForDrag("LeftButton")
   frame:SetClampedToScreen(true)
   frame:SetFrameStrata("HIGH")
   frame:SetBackdrop({
@@ -412,6 +447,16 @@ local function BuildUI()
   local hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   hint:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -12, 14)
   hint:SetText("|cff888888" .. l("keys_hint", "/lfgs keys announce party|guild") .. "|r")
+
+  -- Shown when the merged list is empty so the window is never silently blank.
+  frame.emptyHint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  frame.emptyHint:SetPoint("TOPLEFT", frame, "TOPLEFT", 16, hy - 16)
+  frame.emptyHint:SetWidth(368)
+  frame.emptyHint:SetJustifyH("LEFT")
+  frame.emptyHint:SetText("|cff888888"
+    .. l("keys_empty", "No synced keys yet.\nParty/guild keys appear as their players log in with LFG Suite; alts are recorded as you log them.")
+    .. "|r")
+  frame.emptyHint:Hide()
 end
 
 function NS.ToggleKeysWindow(state)
@@ -506,8 +551,12 @@ local M = {
     elseif event == "GROUP_ROSTER_UPDATE" then
       PruneParty()
       NS.RefreshKeysUI()
-      if IsInGroup and IsInGroup() then
+      -- Coalesce: roster updates arrive in bursts (joins/leaves/role swaps);
+      -- each used to schedule its own delayed bag scan + party broadcast.
+      if IsInGroup and IsInGroup() and not rosterSyncPending then
+        rosterSyncPending = true
         C_Timer.After(1.5, function()
+          rosterSyncPending = false
           RefreshOwn()
           PartySend()
         end)

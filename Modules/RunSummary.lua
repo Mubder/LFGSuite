@@ -97,6 +97,7 @@ local function PartyLine()
   end
   local parts = {}
   local n = GetNumGroupMembers and GetNumGroupMembers() or 1
+  n = math.min(tonumber(n) or 1, 40)
   for i = 1, n do
     local name, _, _, _, _, classFileName = GetRaidRosterInfo(i)
     if name then
@@ -121,7 +122,20 @@ local function ShowPanel(run)
     frame:SetPoint("TOP", UIParent, "TOP", 0, -170)
     frame:SetFrameStrata("HIGH")
     frame:EnableMouse(true)
-    frame:SetScript("OnMouseUp", function() frame:Hide() end)
+    frame:SetMovable(true)
+    frame:SetClampedToScreen(true)
+    frame:RegisterForDrag("LeftButton")
+    -- Drag moves the panel; a click (press+release without dragging) closes it.
+    frame:SetScript("OnMouseDown", function(self) self._lfgsDragged = nil end)
+    frame:SetScript("OnDragStart", function(self)
+      self._lfgsDragged = true
+      self:StartMoving()
+    end)
+    frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+    frame:SetScript("OnMouseUp", function(self)
+      if self._lfgsDragged then return end
+      self:Hide()
+    end)
     frame:SetBackdrop({
       bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
       edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
@@ -143,7 +157,7 @@ local function ShowPanel(run)
     frame.hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     frame.hint:SetPoint("BOTTOM", frame, "BOTTOM", 0, 2)
     frame.hint:SetTextColor(0.5, 0.5, 0.5)
-    frame.hint:SetText(l("sum_hint", "Click to close  •  /lfgs summary to reopen"))
+    frame.hint:SetText(l("sum_hint", "Drag to move  •  Click to close  •  /lfgs summary to reopen"))
     frame:Hide()
   end
 

@@ -66,7 +66,20 @@ local function BuildBanner()
   bannerFrame.sub:SetPoint("TOP", bannerFrame.title, "BOTTOM", 0, -4)
   bannerFrame.sub:SetWidth(520)
   bannerFrame:EnableMouse(true)
-  bannerFrame:SetScript("OnMouseUp", function() bannerFrame:Hide() end)
+  bannerFrame:SetMovable(true)
+  bannerFrame:SetClampedToScreen(true)
+  bannerFrame:RegisterForDrag("LeftButton")
+  -- Drag moves the banner; a click (press+release without dragging) closes it.
+  bannerFrame:SetScript("OnMouseDown", function(self) self._lfgsDragged = nil end)
+  bannerFrame:SetScript("OnDragStart", function(self)
+    self._lfgsDragged = true
+    self:StartMoving()
+  end)
+  bannerFrame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+  bannerFrame:SetScript("OnMouseUp", function(self)
+    if self._lfgsDragged then return end
+    self:Hide()
+  end)
   bannerFrame:Hide()
 end
 
