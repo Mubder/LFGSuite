@@ -125,6 +125,8 @@ LFGSuite.L = {
   tt_listed_fmt = "Listed %dm %02ds ago",
   tt_shift_hint = "<Hold Shift for group composition>",
   tt_ignored_short = "IGNORED",
+  filters_btn = "Filters",
+  filters_btn_tip = "Toggle the listing filter card.",
 
   -- Timer / Forces
   remains = "remains",

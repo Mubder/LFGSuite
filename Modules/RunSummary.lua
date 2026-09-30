@@ -218,7 +218,7 @@ local function ShowPanel(run)
     lines[#lines + 1] = string.format("%s: %s %s", l("pb", "PB"), NS.PB.Format(pb.time), deltaTxt)
   end
   if isPB then
-    lines[#lines + 1] = "|cffffd100★ " .. l("sum_newpb", "NEW PERSONAL BEST") .. "|r"
+    lines[#lines + 1] = "|cffffd100" .. l("sum_newpb", "NEW PERSONAL BEST") .. "|r"
   elseif updated then
     lines[#lines + 1] = string.format("   |cff999999(best was %s)|r", NS.PB.Format(updated))
   end

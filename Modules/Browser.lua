@@ -692,6 +692,40 @@ local function BuildFilterPanel()
   UpdateFilterStatus(0, 0)
 end
 
+-- Filters toggle checkbox on Blizzard's search panel (next to the category
+-- label, where PGF puts its own toggle - the proven free spot).
+local filtersButton
+local function EnsureFiltersButton()
+  if filtersButton then return end
+  if not (LFGListFrame and LFGListFrame.SearchPanel) then return end
+  local panel = LFGListFrame.SearchPanel
+  local b = CreateFrame("CheckButton", "LFGSuiteFiltersButton", panel, "UICheckButtonTemplate")
+  b:SetSize(26, 26)
+  b:SetHitRectInsets(-2, -40, -2, -2)
+  if b.Text then
+    b.Text:SetText("|cffffd100" .. l("filters_btn", "Filters") .. "|r")
+    b.Text:SetFontObject("GameFontHighlight")
+    b.Text:SetWidth(60)
+  end
+  if panel.CategoryName then
+    b:SetPoint("LEFT", panel.CategoryName, "RIGHT", -8, 0)
+  else
+    b:SetPoint("TOPLEFT", panel, "TOPLEFT", 40, 2)
+  end
+  b:SetChecked(not (MDB().filters.cardHidden == true))
+  b:SetScript("OnClick", function(self)
+    NS.ToggleBrowserFilters(self:GetChecked())
+  end)
+  b:SetScript("OnEnter", function(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:SetText("LFG Suite")
+    GameTooltip:AddLine(l("filters_btn_tip", "Toggle the listing filter card."), 1, 1, 1)
+    GameTooltip:Show()
+  end)
+  b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+  filtersButton = b
+end
+
 function NS.ToggleBrowserFilters(state)
   -- The panel is a child of the Group Finder window; it only exists while
   -- that UI is loaded.
@@ -702,8 +736,11 @@ function NS.ToggleBrowserFilters(state)
   BuildFilterPanel()
   if not filterFrame then return end
   if state == nil then state = not filterFrame:IsShown() end
+  -- Remember the choice so re-opening the browser restores it.
+  MDB().filters.cardHidden = (not state) or nil
   if state then ScheduleDecorateSafe() end
   filterFrame:SetShown(state)
+  if filtersButton then filtersButton:SetChecked(state) end
 end
 
 NS.SlashHandlers.filters = function()
@@ -1060,7 +1097,7 @@ local function BuildInspectBlock(tooltip, resultID)
       tooltip:AddLine(" ")
       for _, m in ipairs(members) do
         local who = Util.ClassColorize(m.class, Util.ShortName(m.name))
-        if m.leader then who = "|cffffd100★|r" .. who end
+        if m.leader then who = "|cffffd100*|r" .. who end
         if ignoredSet[m.name:lower()] then
           who = who .. "  |cffff4444" .. l("tt_ignored_short", "IGNORED") .. "|r"
         end
@@ -1158,9 +1195,10 @@ local function EnsureHooks()
     -- Blizzard's globals (they do not exist before this).
     EnsureHooks()
     ScheduleDecorate()
-    -- Filter card is bound to this window: re-show it with the browser
-    -- whenever filters are on.
-    if FiltersEnabled() and NS.ToggleBrowserFilters then
+    -- Filter card + toggle button come up with the browser unless the user
+    -- closed the card on purpose.
+    EnsureFiltersButton()
+    if MDB().filters.cardHidden ~= true then
       NS.ToggleBrowserFilters(true)
     end
   end)

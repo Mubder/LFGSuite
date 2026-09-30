@@ -679,7 +679,7 @@ local function EntryColumns(entry)
   end
   -- Persistent note marker (hover to read, right-click to edit).
   if A.GetNote and A.GetNote(m.name) then
-    nameTxt = "|cffffd100★|r" .. nameTxt
+    nameTxt = "|cffffd100*|r" .. nameTxt
   end
   cols.name = nameTxt
   cols.role = A.RoleTag(A.ResolveRole(m))

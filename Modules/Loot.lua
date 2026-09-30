@@ -162,7 +162,7 @@ local function HandleLootChat(msg, sender)
       local tier = favs[itemID]
       local line = string.format(l("fav_looted_fmt", "%s looted your %s favorite: %s"),
         tostring(sender), (TIER_LABEL[tier] or "?"), ItemName(itemID))
-      NS.Print("|cffffd100★|r " .. line)
+      NS.Print("|cffffd100*|r " .. line)
       if NS.ShowBanner then
         NS.ShowBanner(l("fav_banner", "Favorite looted"),
           sender .. " → " .. ItemName(itemID) .. "  |cffcccccc/whisper to ask for it|r")
@@ -329,7 +329,7 @@ function NS.RefreshLootUI()
     local item = items[offset + i]
     if item then
       local tier = favs[item.itemID]
-      row.fav:SetText(tier and ("|cffffd100★|r " .. (TIER_LABEL[tier] or "?")) or "|cff666666☆|r")
+      row.fav:SetText(tier and ("|cffffd100*|r " .. (TIER_LABEL[tier] or "?")) or "|cff666666-|r")
       row.name:SetText(item.link or tostring(item.name))
       row.ilvl:SetText(item.ilvl and tostring(item.ilvl) or "-")
       row.slot:SetText(item.slot or "-")
