@@ -69,6 +69,8 @@ local BROWSER_DEFAULTS = {
     needs = { tank = false, healer = false, dps = false }, -- group still LACKS role
     minMembers = 0,  -- at least N members; 0 = off
     minReqIlvl = 0,  -- listing requires ilvl >= N; 0 = off (unknown stays)
+    activities = {}, -- [activityID] = true: keep only these dungeons (none = all)
+    cardHidden = nil, -- user closed the filter card on purpose
   },
 }
 
@@ -239,6 +241,15 @@ local function RowFilteredOut(info)
     local req = info.requiredItemLevel or info.iLvl or info.requiredILvl
     -- Unknown requirement: keep.
     if type(req) == "number" and req > 0 and req < f.minReqIlvl then return true end
+  end
+  -- Dungeon whitelist: ticked activities keep; unknown activity stays.
+  local acts = f.activities or {}
+  local anyAct = false
+  for _ in pairs(acts) do anyAct = true break end
+  if anyAct then
+    local aid = info.activityID
+    if (not aid) and type(info.activityIDs) == "table" then aid = info.activityIDs[1] end
+    if aid and not acts[aid] then return true end
   end
   return false
 end
@@ -603,18 +614,69 @@ local function RoleChip(parent, role, label, x, y)
   return b
 end
 
+local sessionManualDock = false
+
+-- Dock-aware placement: other cards attached to the browser's right side
+-- (Raider.IO's panel, etc.) occupy the first dock slot(s); we slot in AFTER
+-- the rightmost one instead of overlapping. Scans the Group Finder's own
+-- children and top-level frames docked to its right edge. Manual dragging
+-- disables auto-docking for the session.
+local function RelayoutCard()
+  if not (filterFrame and PVEFrame) then return end
+  if sessionManualDock then return end
+  pcall(function()
+    local pr, pt = PVEFrame:GetRight(), PVEFrame:GetTop()
+    if not (pr and pt) then return
+    end
+    local rightmost = pr
+    local function consider(f)
+      if not f or f == filterFrame or f == PVEFrame then return end
+      if not (f.IsShown and f:IsShown()) then return end
+      if not (f.GetLeft and f.GetTop and f.GetWidth) then return end
+      local lf, tf, wf = f:GetLeft(), f:GetTop(), f:GetWidth()
+      if not (lf and tf and wf) then return end
+      -- A docked card: starts at/after the browser's right edge, sits in
+      -- the top band, panel-sized (not the whole screen).
+      if wf > 40 and wf < 700 and lf >= pr - 24 and tf > pt - 140 then
+        local r = lf + wf
+        if r > rightmost then rightmost = r end
+      end
+    end
+    local function scanChildren(fr)
+      if not (fr and fr.GetChildren) then return end
+      local okP, packed = pcall(function(...) return { ... } end, fr:GetChildren())
+      if not (okP and type(packed) == "table") then return end
+      -- Modern clients return a single table of children; older return
+      -- each child separately. Handle both shapes.
+      if type(packed[1]) == "table" and packed[2] == nil and packed[1][1] and packed[1][1].IsShown then
+        for _, ch in ipairs(packed[1]) do consider(ch) end
+      else
+        for _, ch in ipairs(packed) do if type(ch) == "table" then consider(ch) end end
+      end
+    end
+    scanChildren(PVEFrame)
+    scanChildren(UIParent)
+    filterFrame:ClearAllPoints()
+    filterFrame:SetPoint("TOPLEFT", PVEFrame, "TOPRIGHT", rightmost - pr + 8, 0)
+  end)
+end
+
 local function BuildFilterPanel()
   if filterFrame then return end
   if not PVEFrame then return end -- binds to the Group Finder window
   filterFrame = CreateFrame("Frame", "LFGSuiteBrowserFilters", PVEFrame)
-  filterFrame:SetSize(248, 360)
+  filterFrame:SetSize(248, 392)
   -- Stick to the Group Finder: parenting makes it move + hide together.
   filterFrame:SetPoint("TOPLEFT", PVEFrame, "TOPRIGHT", 8, 0)
   filterFrame:SetFrameStrata("HIGH")
   filterFrame:SetFrameLevel((PVEFrame:GetFrameLevel() or 50) + 30)
   filterFrame:SetMovable(true)
   filterFrame:EnableMouse(false) -- body click-through; drag via header
-  if NS.Theme and NS.Theme.Apply then NS.Theme.Apply(filterFrame) end
+  if NS.Theme and NS.Theme.Apply then
+    -- onMove doubles as the "user took over placement" signal: manual
+    -- drags stop the auto-docking for this session.
+    NS.Theme.Apply(filterFrame, function() sessionManualDock = true end)
+  end
 
   local title = filterFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   title:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 0, -6)
@@ -647,6 +709,93 @@ local function BuildFilterPanel()
     ApplyFiltersToList()
   end)
   PaintSortMode()
+  y = y - 30
+  -- Dungeon selection: activities seen in the CURRENT search, multi-select
+  -- via a dropdown (the card stays compact).
+  filterFrame.dungeonBtn = CreateFrame("Button", nil, filterFrame, "UIPanelButtonTemplate")
+  filterFrame.dungeonBtn:SetSize(216, 22)
+  filterFrame.dungeonBtn:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
+  local function PaintDungeonBtn()
+    local acts = MDB().filters.activities or {}
+    local n = 0
+    for _ in pairs(acts) do n = n + 1 end
+    filterFrame.dungeonBtn:SetText(n > 0
+      and l("filters_dungeons_fmt", "Dungeons: %d picked"):format(n)
+      or l("filters_dungeons_all", "Dungeons: All"))
+  end
+  local function HarvestActivities()
+    -- Unique activities from the live search (verified shape: total, list).
+    local out, seen = {}, {}
+    local ids = nil
+    if C_LFGList.GetSearchResults then
+      local okR, list = pcall(C_LFGList.GetSearchResults)
+      if okR and type(list) == "table" then ids = list
+      elseif okR and type(list) == "number" then
+        local okR2, _, list2 = pcall(C_LFGList.GetSearchResults)
+        if okR2 and type(list2) == "table" then ids = list2 end
+      end
+    end
+    for _, rid in ipairs(ids or {}) do
+      local okI, info = pcall(C_LFGList.GetSearchResultInfo, rid)
+      if okI and type(info) == "table" then
+        local aid = info.activityID
+        if (not aid) and type(info.activityIDs) == "table" then aid = info.activityIDs[1] end
+        if aid and not seen[aid] then
+          seen[aid] = true
+          local name = tostring(aid)
+          if C_LFGList.GetActivityInfoTable then
+            local okA, ai = pcall(C_LFGList.GetActivityInfoTable, aid)
+            if okA and type(ai) == "table" then
+              name = ai.shortName or ai.fullName or name
+            end
+          end
+          out[#out + 1] = { id = aid, name = name }
+        end
+      end
+    end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    return out
+  end
+  filterFrame.dungeonBtn:SetScript("OnClick", function(self)
+    local list = HarvestActivities()
+    if #list == 0 then
+      NS.Print(l("filters_dungeons_none", "No dungeons in the current search - run a search first."))
+      return
+    end
+    if MenuUtil and MenuUtil.CreateContextMenu then
+      MenuUtil.CreateContextMenu(self, function(_, root)
+        root:CreateTitle(l("filters_dungeons", "Dungeons"))
+        local okCB = pcall(function()
+          root:CreateCheckbox(l("filters_dungeons_all", "All (clear selection)"),
+            function() return false end,
+            function()
+              MDB().filters.activities = {}
+              PaintDungeonBtn()
+              ApplyFiltersToList()
+            end)
+        end)
+        for _, act in ipairs(list) do
+          pcall(function()
+            root:CreateCheckbox(act.name,
+              function() return (MDB().filters.activities or {})[act.id] == true end,
+              function()
+                local f = MDB().filters
+                f.activities = f.activities or {}
+                f.activities[act.id] = (not f.activities[act.id]) or nil
+                PaintDungeonBtn()
+                ApplyFiltersToList()
+              end)
+          end)
+        end
+      end)
+    else
+      -- Pre-MenuUtil fallback: cycle is pointless for 8 dungeons; just clear.
+      MDB().filters.activities = {}
+      PaintDungeonBtn()
+      ApplyFiltersToList()
+    end
+  end)
+  PaintDungeonBtn()
   y = y - 28
   local kl = filterFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   kl:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
@@ -690,6 +839,14 @@ local function BuildFilterPanel()
   filterFrame.status:SetJustifyH("LEFT")
 
   UpdateFilterStatus(0, 0)
+  RelayoutCard()
+  -- Keep the dock slot current (other cards may attach later, e.g. the
+  -- Raider.IO panel appearing after ours). Cheap scan, 1s cadence.
+  filterFrame:SetScript("OnUpdate", function(self)
+    if (GetTime() - (self._dockT or 0)) < 1 then return end
+    self._dockT = GetTime()
+    RelayoutCard()
+  end)
 end
 
 -- Filters toggle checkbox on Blizzard's search panel (next to the category
@@ -740,6 +897,7 @@ function NS.ToggleBrowserFilters(state)
   MDB().filters.cardHidden = (not state) or nil
   if state then ScheduleDecorateSafe() end
   filterFrame:SetShown(state)
+  if state then RelayoutCard() end
   if filtersButton then filtersButton:SetChecked(state) end
 end
 

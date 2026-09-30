@@ -127,6 +127,10 @@ LFGSuite.L = {
   tt_ignored_short = "IGNORED",
   filters_btn = "Filters",
   filters_btn_tip = "Toggle the listing filter card.",
+  filters_dungeons = "Dungeons",
+  filters_dungeons_all = "Dungeons: All",
+  filters_dungeons_fmt = "Dungeons: %d picked",
+  filters_dungeons_none = "No dungeons in the current search - run a search first.",
 
   -- Timer / Forces
   remains = "remains",
