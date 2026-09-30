@@ -999,6 +999,15 @@ local M = {
     if LFGAlertActive() then NoteInterop() return end
     local applicantID = ...
 
+    -- Non-leader QoL: Blizzard covers the applicant viewer with a
+    -- mouse-blocking frame for non-leaders; lift it so group members can
+    -- hover/inspect applicants (read-only - actions still leader-gated).
+    if LFGListFrame and LFGListFrame.ApplicationViewer
+      and LFGListFrame.ApplicationViewer.UnempoweredCover then
+      pcall(LFGListFrame.ApplicationViewer.UnempoweredCover.EnableMouse,
+        LFGListFrame.ApplicationViewer.UnempoweredCover, false)
+    end
+
     if event == "PLAYER_REGEN_ENABLED" then
       if pendingOpenLFG then
         pendingOpenLFG = false

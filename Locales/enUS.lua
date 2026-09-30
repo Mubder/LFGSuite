@@ -121,6 +121,10 @@ LFGSuite.L = {
   role_tank = "Tank",
   role_heal = "Heal",
   role_dps = "DPS",
+  sort_mode_fmt = "Sort: %s",
+  tt_listed_fmt = "Listed %dm %02ds ago",
+  tt_shift_hint = "<Hold Shift for group composition>",
+  tt_ignored_short = "IGNORED",
 
   -- Timer / Forces
   remains = "remains",

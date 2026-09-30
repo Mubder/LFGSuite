@@ -485,6 +485,13 @@ local filterFrame
 
 local ScheduleDecorate -- forward-declared: defined near DecorateRows below
 
+local ApplyFiltersToList -- forward-declared: defined after DecorateRows
+
+local SORT_MODES = { "blizzard", "new", "old", "key" }
+local SORT_LABEL = {
+  blizzard = "Blizzard", new = "Newest", old = "Oldest", key = "Key level",
+}
+
 -- The edit boxes and checkboxes poke a re-decorate; guard it like the
 -- deferred pass (errors degrade to a chat line, never a UI break).
 local function ScheduleDecorateSafe()
@@ -563,7 +570,7 @@ local function LevelButton(parent, lvl, x, y)
     f.levels = f.levels or {}
     f.levels[lvl] = (not f.levels[lvl]) or nil
     self:Paint()
-    ScheduleDecorateSafe()
+    ApplyFiltersToList()
   end)
   b:Paint()
   return b
@@ -590,7 +597,7 @@ local function RoleChip(parent, role, label, x, y)
     f.needs = f.needs or {}
     f.needs[role] = (not f.needs[role]) or nil
     self:Paint()
-    ScheduleDecorateSafe()
+    ApplyFiltersToList()
   end)
   b:Paint()
   return b
@@ -600,7 +607,7 @@ local function BuildFilterPanel()
   if filterFrame then return end
   if not PVEFrame then return end -- binds to the Group Finder window
   filterFrame = CreateFrame("Frame", "LFGSuiteBrowserFilters", PVEFrame)
-  filterFrame:SetSize(248, 330)
+  filterFrame:SetSize(248, 360)
   -- Stick to the Group Finder: parenting makes it move + hide together.
   filterFrame:SetPoint("TOPLEFT", PVEFrame, "TOPRIGHT", 8, 0)
   filterFrame:SetFrameStrata("HIGH")
@@ -619,7 +626,27 @@ local function BuildFilterPanel()
   local y = -34
   FilterCheckbox(filterFrame, "LFGSFilterEnable", l("filters_enable", "Enable filters"),
     16, y, function() return F().enabled == true end,
-    function(v) F().enabled = v ScheduleDecorateSafe() end)
+    function(v) F().enabled = v ApplyFiltersToList() end)
+  y = y - 30
+  filterFrame.sortBtn = CreateFrame("Button", nil, filterFrame, "UIPanelButtonTemplate")
+  filterFrame.sortBtn:SetSize(216, 22)
+  filterFrame.sortBtn:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
+  local function PaintSortMode()
+    local mode = MDB().sortMode or "blizzard"
+    filterFrame.sortBtn:SetText(l("sort_mode_fmt", "Sort: %s"):format(SORT_LABEL[mode] or mode))
+  end
+  filterFrame.sortBtn:SetScript("OnClick", function()
+    local db = MDB()
+    local cur = db.sortMode or "blizzard"
+    local nxt = "blizzard"
+    for i, m in ipairs(SORT_MODES) do
+      if m == cur then nxt = SORT_MODES[(i % #SORT_MODES) + 1] break end
+    end
+    db.sortMode = nxt
+    PaintSortMode()
+    ApplyFiltersToList()
+  end)
+  PaintSortMode()
   y = y - 28
   local kl = filterFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   kl:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
@@ -655,7 +682,7 @@ local function BuildFilterPanel()
   y = y - 32
   FilterCheckbox(filterFrame, "LFGSFilterHideFull", l("filters_hidefull", "Hide full M+ groups (5/5)"),
     16, y, function() return F().hideFull == true end,
-    function(v) F().hideFull = v ScheduleDecorateSafe() end)
+    function(v) F().hideFull = v ApplyFiltersToList() end)
   y = y - 26
   filterFrame.status = filterFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   filterFrame.status:SetPoint("TOPLEFT", filterFrame, "TOPLEFT", 16, y)
@@ -681,6 +708,92 @@ end
 
 NS.SlashHandlers.filters = function()
   NS.ToggleBrowserFilters()
+end
+
+-- ---------------------------------------------------------------------------
+-- True results filtering + sorting: stash Blizzard's fresh results table
+-- (post-hook on UpdateResultList), then swap SearchPanel.results with a
+-- filtered/sorted copy and re-render via UpdateResults. Off = restore the
+-- full list. Rows actually leave the list - no dimming.
+-- ---------------------------------------------------------------------------
+
+local fullResults = nil
+local resultsHookInstalled = false
+
+function ApplyFiltersToList()
+  if not (LFGListFrame and LFGListFrame.SearchPanel) then return end
+  if not fullResults then return end
+  if type(LFGListSearchPanel_UpdateResults) ~= "function" then return end
+  local panel = LFGListFrame.SearchPanel
+
+  local out = {}
+  if FiltersEnabled() then
+    for _, resultID in ipairs(fullResults) do
+      local okI, info = pcall(C_LFGList.GetSearchResultInfo, resultID)
+      -- Unreadable results always stay (never hide what we cannot parse).
+      if not (okI and type(info) == "table") or not RowFilteredOut(info) then
+        out[#out + 1] = resultID
+      end
+    end
+  else
+    for _, rid in ipairs(fullResults) do out[#out + 1] = rid end
+  end
+
+  -- Sorting (precompute keys; the comparator must not call APIs).
+  local mode = MDB().sortMode or "blizzard"
+  if mode ~= "blizzard" then
+    local keyed = {}
+    for _, rid in ipairs(out) do
+      local age, level = 0, 0
+      local okI, info = pcall(C_LFGList.GetSearchResultInfo, rid)
+      if okI and type(info) == "table" then
+        age = tonumber(info.age) or 0
+        level = Util.ParseKeyLevel(Util.CleanKString((info.name or "") .. " " .. (info.comment or ""))) or 0
+      end
+      keyed[#keyed + 1] = { rid = rid, age = age, level = level }
+    end
+    if mode == "new" then
+      table.sort(keyed, function(a, b)
+        if a.age ~= b.age then return a.age < b.age end
+        return a.rid < b.rid
+      end)
+    elseif mode == "old" then
+      table.sort(keyed, function(a, b)
+        if a.age ~= b.age then return a.age > b.age end
+        return a.rid < b.rid
+      end)
+    else -- key
+      table.sort(keyed, function(a, b)
+        if a.level ~= b.level then return a.level > b.level end
+        return a.age < b.age
+      end)
+    end
+    for i, k in ipairs(keyed) do out[i] = k.rid end
+  end
+
+  panel.results = out
+  local apps = (type(panel.applications) == "table") and #panel.applications or 0
+  panel.totalResults = #out + apps
+  pcall(LFGListSearchPanel_UpdateResults, panel)
+  UpdateFilterStatus(#out, #fullResults - #out)
+  ScheduleDecorateSafe()
+end
+
+local function InstallResultsHook()
+  if resultsHookInstalled then return true end
+  if type(LFGListSearchPanel_UpdateResultList) ~= "function" then return false end
+  local ok = pcall(hooksecurefunc, "LFGListSearchPanel_UpdateResultList", function(panelSelf)
+    pcall(function()
+      if type(panelSelf.results) == "table" then
+        local copy = {}
+        for _, rid in ipairs(panelSelf.results) do copy[#copy + 1] = rid end
+        fullResults = copy
+      end
+      ApplyFiltersToList()
+    end)
+  end)
+  if ok then resultsHookInstalled = true end
+  return ok
 end
 
 local function DecorateRows()
@@ -819,106 +932,185 @@ local ARMOR_COLOR = {
 }
 local ARMOR_ORDER = { "plate", "mail", "leather", "cloth" }
 
+-- Group-inspect tooltip block (LFG Inspect-inspired, our implementation):
+-- hooking the tooltip BUILDER (LFGListUtil_SetSearchEntryTooltip) - the
+-- OnEnter hook never fires reliably because rows share Blizzard handlers.
+-- Adds: listing age, dungeon member roster (name/class/role/spec), raid
+-- comp by role (Shift for raids unless set to always), armor distribution
+-- with your own armor highlighted, ignore-list warnings, leader score.
 local tooltipHookInstalled = false
-local function InstallTooltipHook()
-  if tooltipHookInstalled then return true end
-  if type(LFGListSearchEntry_OnEnter) ~= "function" then return false end
-  local ok = pcall(hooksecurefunc, "LFGListSearchEntry_OnEnter", function(btn)
-    local okB, errB = pcall(function()
-      local rid = GetResultID(btn)
-      if not rid then return end
-      if not (GameTooltip and GameTooltip.AddLine) then return end
-      local okI, info = pcall(C_LFGList.GetSearchResultInfo, rid)
-      if not (okI and type(info) == "table") then return end
-      -- Full inspect block on Shift (or always, per the option).
+local currentTooltip, currentResultID
+
+local function BuildInspectBlock(tooltip, resultID)
+  if not (tooltip and tooltip.AddLine) then return end
+  if not (C_LFGList and C_LFGList.GetSearchResultInfo) then return end
+  local okI, info = pcall(C_LFGList.GetSearchResultInfo, resultID)
+  if not (okI and type(info) == "table") then return end
+
+  if info.age and type(info.age) == "number" then
+    local m, s = math.floor(info.age / 60), math.floor(info.age % 60)
+    tooltip:AddLine(" ")
+    tooltip:AddLine(l("tt_listed_fmt", "Listed %dm %02ds ago"):format(m, s), 0.8, 0.8, 0.8)
+  end
+
+  -- Activity: raid vs dungeon decides roster vs comp.
+  local activityID = info.activityID
+  if (not activityID) and type(info.activityIDs) == "table" then
+    activityID = info.activityIDs[1]
+  end
+  local isRaid
+  if activityID and C_LFGList.GetActivityInfoTable then
+    local okA, ai = pcall(C_LFGList.GetActivityInfoTable, activityID)
+    if okA and type(ai) == "table" then
+      isRaid = ai.isCurrentRaidActivity == true
+    end
+  end
+
+  -- Ignore list (built per tooltip; cheap: usually tiny).
+  local ignoredSet = {}
+  if C_FriendList and C_FriendList.GetNumIgnores and C_FriendList.GetIgnoreName then
+    local okN, n = pcall(C_FriendList.GetNumIgnores)
+    if okN and type(n) == "number" then
+      for i = 1, math.min(n, 100) do
+        local okG, full = pcall(C_FriendList.GetIgnoreName, i)
+        if okG and type(full) == "string" then
+          ignoredSet[(full:match("^[^%-]+") or full):lower()] = true
+        end
+      end
+    end
+  end
+
+  local nm = info.numMembers or info.memberCount or 0
+
+  if isRaid then
+    -- Raid comp: role-grouped class counts from Blizzard's member data.
+    local counts
+    if C_LFGList.GetSearchResultMemberCounts then
+      local okC, c = pcall(C_LFGList.GetSearchResultMemberCounts, resultID)
+      if okC and type(c) == "table" then counts = c end
+    end
+    local byRole = counts and counts.classesByRole
+    if type(byRole) == "table" then
       local db = MDB()
-      if db.inspectShiftOnly ~= false and not IsShiftKeyDown() then return end
-      local nm = info.numMembers or info.memberCount or 0
-      -- Member roster via the modern table API (name/class/role/spec/leader).
-      -- The old positional GetSearchResultMemberInfo is deprecated AND its
-      -- Midnight return order differs from what we used to unpack.
-      local members = {}
-      local getPlayerInfo = C_LFGList and C_LFGList.GetSearchResultPlayerInfo
-      if type(getPlayerInfo) == "function" then
-        for i = 1, math.min(nm, 40) do
-          local okM, pi = pcall(getPlayerInfo, rid, i)
-          if okM and type(pi) == "table" then
-            local mname = pi.name or pi.fullName
-            if type(mname) == "string" and mname ~= "" then
-              members[#members + 1] = {
-                name = mname,
-                class = pi.classFilename,
-                role = pi.assignedRole,
-                spec = pi.specName,
-                leader = pi.isLeader == true,
-              }
+      if db.inspectShiftOnly == true and not IsShiftKeyDown() then
+        tooltip:AddLine(" ")
+        tooltip:AddLine(l("tt_shift_hint", "<Hold Shift for group composition>"), 0.6, 0.6, 0.6)
+      else
+        tooltip:AddLine(" ")
+        for _, role in ipairs({ "TANK", "HEALER", "DAMAGER" }) do
+          local roleClasses = byRole[role]
+          if type(roleClasses) == "table" then
+            local parts = {}
+            for className, n2 in pairs(roleClasses) do
+              if type(n2) == "number" and n2 > 0 then
+                parts[#parts + 1] = Util.ClassColorize(className, className) .. (n2 > 1 and (" x" .. n2) or "")
+              end
+            end
+            if #parts > 0 then
+              table.sort(parts)
+              tooltip:AddDoubleLine(role, table.concat(parts, "  "), 0.9, 0.9, 0.9, 1, 1, 1)
             end
           end
         end
-      end
-      if #members == 0 then return end
-      -- Ignored players first: the thing you want to know before joining.
-      local ignored = {}
-      local isIgnored = C_FriendList and C_FriendList.IsIgnored or IsIgnored
-      for _, m in ipairs(members) do
-        if type(isIgnored) == "function" then
-          local okG, res = pcall(isIgnored, Util.ShortName(m.name))
-          if okG and res then ignored[#ignored + 1] = m.name end
+        -- Armor counts, own armor highlighted.
+        local armor = {}
+        for className, n2 in pairs(counts) do
+          if type(n2) == "number" and not tostring(className):find("REMAINING") then
+            local a = ARMOR_OF_CLASS[className]
+            if a then armor[a] = (armor[a] or 0) + n2 end
+          end
+        end
+        local myArmor = ARMOR_OF_CLASS[select(2, UnitClass("player")) or ""]
+        local bits = {}
+        for _, a in ipairs(ARMOR_ORDER) do
+          if armor[a] then
+            local col = (a == myArmor) and "|cff33ff33" or (ARMOR_COLOR[a] or "")
+            bits[#bits + 1] = col .. armor[a] .. " " .. a .. "|r"
+          end
+        end
+        if #bits > 0 then
+          tooltip:AddDoubleLine(l("tt_armor", "Armor"), table.concat(bits, "  "), 0.8, 0.85, 1, 1, 1, 1)
         end
       end
-      if #ignored > 0 then
-        GameTooltip:AddLine("|cffff3333" .. l("tt_ignored", "IGNORED players in group") .. ": "
-          .. table.concat(ignored, ", ") .. "|r", 1, 0.3, 0.3, true)
+    end
+  else
+    -- Dungeon: full roster - name (class color, leader starred) + spec + role.
+    local members = {}
+    local getPlayerInfo = C_LFGList and C_LFGList.GetSearchResultPlayerInfo
+    if type(getPlayerInfo) == "function" then
+      for i = 1, math.min(nm, 40) do
+        local okM, pi = pcall(getPlayerInfo, resultID, i)
+        if okM and type(pi) == "table" then
+          local mname = pi.name or pi.fullName
+          if type(mname) == "string" and mname ~= "" then
+            members[#members + 1] = {
+              name = mname, class = pi.classFilename, role = pi.assignedRole,
+              spec = pi.specName, leader = pi.isLeader == true,
+            }
+          end
+        end
       end
-      -- Member list: name (class color) + spec/role, leader starred -
-      -- full lines for dungeons, count summary for raids.
+    end
+    if #members > 0 then
       local ROLE_TXT = {
         TANK = "|cff55aaff" .. l("role_tank", "Tank") .. "|r",
         HEALER = "|cff55ff55" .. l("role_heal", "Heal") .. "|r",
         DAMAGER = "|cffffcc55" .. l("role_dps", "DPS") .. "|r",
       }
-      if #members <= 6 then
-        local lines = {}
-        for _, m in ipairs(members) do
-          local who = Util.ClassColorize(m.class, Util.ShortName(m.name))
-          if m.leader then who = "|cffffd100★|r" .. who end
-          local detail = {}
-          if m.spec and m.spec ~= "" then detail[#detail + 1] = m.spec end
-          if m.role then detail[#detail + 1] = ROLE_TXT[m.role] or m.role end
-          if #detail > 0 then
-            lines[#lines + 1] = who .. " |cff888888(|r" .. table.concat(detail, " ") .. "|cff888888)|r"
-          else
-            lines[#lines + 1] = who
-          end
-        end
-        GameTooltip:AddLine(table.concat(lines, "\n"), 0.9, 0.9, 0.9, true)
-      else
-        GameTooltip:AddLine(string.format(l("tt_members_fmt", "%d members"), #members), 0.9, 0.9, 0.9)
-      end
-      -- Armor type distribution = loot competition (tier tokens follow armor).
-      local armor = {}
+      tooltip:AddLine(" ")
       for _, m in ipairs(members) do
-        local a = m.class and ARMOR_OF_CLASS[m.class]
-        if a then armor[a] = (armor[a] or 0) + 1 end
-      end
-      local bits = {}
-      for _, a in ipairs(ARMOR_ORDER) do
-        if armor[a] then
-          bits[#bits + 1] = (ARMOR_COLOR[a] or "") .. armor[a] .. " " .. a .. "|r"
+        local who = Util.ClassColorize(m.class, Util.ShortName(m.name))
+        if m.leader then who = "|cffffd100★|r" .. who end
+        if ignoredSet[m.name:lower()] then
+          who = who .. "  |cffff4444" .. l("tt_ignored_short", "IGNORED") .. "|r"
         end
-      end
-      if #bits > 0 then
-        GameTooltip:AddLine(l("tt_armor", "Armor") .. ": " .. table.concat(bits, "  "), 0.8, 0.85, 1)
+        local detail = {}
+        if m.spec and m.spec ~= "" then detail[#detail + 1] = m.spec end
+        if m.role then detail[#detail + 1] = ROLE_TXT[m.role] or m.role end
+        if #detail > 0 then
+          who = who .. " |cff888888(|r" .. table.concat(detail, " ") .. "|cff888888)|r"
+        end
+        tooltip:AddLine(who, 1, 1, 1, true)
       end
       local sc = GetLeaderScore(info)
       if sc then
-        GameTooltip:AddLine(l("score_lbl", "score") .. " " .. ColorScore(sc), 0.8, 0.85, 1)
+        tooltip:AddDoubleLine(l("score_lbl", "score"), ColorScore(sc), 0.8, 0.85, 1, 1, 1, 1)
       end
-      GameTooltip:Show()
-    end)
+    end
+  end
+  tooltip:Show()
+end
+
+local function InstallTooltipHook()
+  if tooltipHookInstalled then return true end
+  if type(LFGListUtil_SetSearchEntryTooltip) ~= "function" then return false end
+  local ok = pcall(hooksecurefunc, "LFGListUtil_SetSearchEntryTooltip", function(tooltip, resultID)
+    if not resultID or not tooltip:IsVisible() then
+      currentTooltip, currentResultID = nil, nil
+      return
+    end
+    currentTooltip, currentResultID = tooltip, resultID
+    local okB, errB = pcall(BuildInspectBlock, tooltip, resultID)
     if not okB and NS.ModuleError then NS.ModuleError({ key = "browser" }, errB) end
   end)
-  if ok then tooltipHookInstalled = true end
+  if ok then
+    tooltipHookInstalled = true
+    -- Shift toggles the raid comp: rebuild the tooltip so the block swaps.
+    local f = CreateFrame("Frame")
+    pcall(f.RegisterEvent, f, "MODIFIER_STATE_CHANGED")
+    f:SetScript("OnEvent", function(_, _, key, state)
+      if key ~= "LSHIFT" and key ~= "RSHIFT" then return end
+      if currentTooltip and currentResultID and currentTooltip:IsVisible() then
+        local owner = currentTooltip:GetOwner()
+        if owner and owner.resultID == currentResultID then
+          currentTooltip:ClearLines()
+          pcall(LFGListUtil_SetSearchEntryTooltip, currentTooltip, currentResultID)
+        else
+          currentTooltip, currentResultID = nil, nil
+        end
+      end
+    end)
+  end
   return ok
 end
 
@@ -957,6 +1149,7 @@ local function EnsureHooks()
   InstallRowUpdateHook()
   InstallTooltipHook()
   InstallDialogHook()
+  InstallResultsHook()
   if hooksInstalled then return end
   local lfg = LFGListFrame or GroupFinderFrame
   if type(lfg) ~= "table" or type(lfg.HookScript) ~= "function" then return end
