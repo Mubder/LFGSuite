@@ -319,6 +319,21 @@ local function EvaluateQueue()
   UpdateTimer()
 end
 
+-- Queue-state poller: this client generation has no usable queue-status
+-- event (UPDATE_STATUS is not registrable), so probe the queue APIs once a
+-- second from an always-alive frame. The probes are pcall pairs - cheap.
+local pollFrame
+local function EnsurePoller()
+  if pollFrame then return end
+  pollFrame = CreateFrame("Frame")
+  pollFrame:SetScript("OnUpdate", function(self)
+    if (GetTime() - (self._t or 0)) < 1 then return end
+    self._t = GetTime()
+    local ok, err = pcall(EvaluateQueue)
+    if not ok and NS.ModuleError then NS.ModuleError({ key = "queue" }, err) end
+  end)
+end
+
 -- ---------------------------------------------------------------------------
 -- Joined-group detection (premade side)
 -- ---------------------------------------------------------------------------
@@ -400,18 +415,20 @@ local M = {
   status = "alpha",
   defaultEnabled = true,
   events = {
-    "UPDATE_STATUS", "LFG_PROPOSAL_SHOW", "UPDATE_BATTLEFIELD_STATUS",
+    "LFG_PROPOSAL_SHOW", "UPDATE_BATTLEFIELD_STATUS",
     "LFG_LIST_APPLICATION_STATUS_UPDATED", "GROUP_ROSTER_UPDATE",
   },
   OnLoad = function()
     MDB()
     wasInGroup = IsInGroup and IsInGroup() or false
     BuildTimer()
+    EnsurePoller()
   end,
   OnEnable = function()
     MDB()
     wasInGroup = IsInGroup and IsInGroup() or false
     BuildTimer()
+    EnsurePoller()
     EvaluateQueue()
   end,
   OnDisable = function()
@@ -421,14 +438,12 @@ local M = {
   OnEvent = function(_, event, ...)
     local arg1 = ...
     InitRoleCheckHook() -- LFD UI is load-on-demand; cheap + idempotent
-    if event == "UPDATE_STATUS" or event == "UPDATE_BATTLEFIELD_STATUS" then
+    if event == "UPDATE_BATTLEFIELD_STATUS" then
       -- Battleground "confirm" = queue popped.
-      if event == "UPDATE_BATTLEFIELD_STATUS" then
-        local ok, status, mapName = pcall(GetBattlefieldStatus, arg1 or 1)
-        if ok and status == "confirm" then
-          if bgWait then RecordQueueTime("BG", bgWait) end
-          QueuePop(l("banner_bg_ready", "Battleground ready"), mapName or "")
-        end
+      local ok, status, mapName = pcall(GetBattlefieldStatus, arg1 or 1)
+      if ok and status == "confirm" then
+        if bgWait then RecordQueueTime("BG", bgWait) end
+        QueuePop(l("banner_bg_ready", "Battleground ready"), mapName or "")
       end
       EvaluateQueue()
     elseif event == "LFG_PROPOSAL_SHOW" then

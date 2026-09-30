@@ -351,7 +351,7 @@ local M = {
   status = "alpha",
   defaultEnabled = true,
   events = {
-    "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT", "INSTANCE_RESET",
+    "PLAYER_ENTERING_WORLD", "PLAYER_LOGOUT", "INSTANCE_RESET_SUCCESS",
     "CHALLENGE_MODE_COMPLETED",
   },
   OnLoad = function() MDB() end,
@@ -376,7 +376,7 @@ local M = {
         SnapshotChar()
         NS.RefreshRosterUI()
       end)
-    elseif event == "INSTANCE_RESET" then
+    elseif event == "INSTANCE_RESET_SUCCESS" then
       if MDB().announceResets and IsInGroup and IsInGroup() then
         local zone = IsInInstance() and GetRealZoneText() or nil
         if zone then

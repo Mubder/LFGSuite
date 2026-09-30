@@ -169,6 +169,52 @@ local function TrackDeathCLEU()
   NS.RefreshTimerUI()
 end
 
+-- Death-feed wiring. The combat-log event name is NOT stable across client
+-- generations (live Midnight rejects COMBAT_LOG_EVENT_UNTRUSTED
+-- registration), so probe candidate names on a dedicated frame; if none
+-- register, fall back to polling alive->dead transitions on party units.
+local deathFeedTried = false
+local unitAlive = {}
+
+local function PollDeaths()
+  if not state.active then return end
+  for i = 0, 4 do
+    local unit = (i == 0) and "player" or ("party" .. i)
+    if UnitExists(unit) then
+      local dead = UnitIsDeadOrGhost(unit) and true or false
+      if unitAlive[unit] == false and dead then
+        local name = GetUnitName and GetUnitName(unit, true) or nil
+        local short = name and Util.ShortName(name) or nil
+        if short and short ~= "" then
+          pdeaths[short] = (pdeaths[short] or 0) + 1
+          NS.RefreshTimerUI()
+        end
+      end
+      unitAlive[unit] = dead
+    end
+  end
+end
+
+local function EnsureDeathFeed()
+  if deathFeedTried then return end
+  deathFeedTried = true
+  local f = CreateFrame("Frame")
+  for _, ev in ipairs({ "COMBAT_LOG_EVENT_UNTRUSTED", "COMBAT_LOG_EVENT" }) do
+    if pcall(f.RegisterEvent, f, ev) then
+      f:SetScript("OnEvent", function() TrackDeathCLEU() end)
+      return
+    end
+  end
+  -- No combat-log event on this client: poll alive->dead transitions (2Hz,
+  -- only meaningful during runs; guard inside PollDeaths).
+  f:SetScript("OnUpdate", function(self)
+    if (GetTime() - (self._t or 0)) < 0.5 then return end
+    self._t = GetTime()
+    local ok, err = pcall(PollDeaths)
+    if not ok and NS.ModuleError then NS.ModuleError({ key = "timer" }, err) end
+  end)
+end
+
 -- Boss objective count/progress via the scenario criteria system. Boss
 -- criteria have totalQuantity 1 (enemy-forces criteria are the huge totals -
 -- see the Forces module's probe). Shape differences across clients are
@@ -624,15 +670,17 @@ local M = {
   events = {
     "CHALLENGE_MODE_START", "CHALLENGE_MODE_COMPLETED", "CHALLENGE_MODE_RESET",
     "CHALLENGE_MODE_DEATH_COUNT_UPDATED", "SCENARIO_CRITERIA_UPDATE",
-    "COMBAT_LOG_EVENT_UNTRUSTED", "PLAYER_ENTERING_WORLD",
+    "PLAYER_ENTERING_WORLD",
   },
   OnLoad = function()
     MDB()
     BuildUI()
+    EnsureDeathFeed()
   end,
   OnEnable = function()
     MDB()
     BuildUI()
+    EnsureDeathFeed()
   end,
   OnDisable = function()
     state.active = false
@@ -660,8 +708,6 @@ local M = {
         ProbeObjectives()
         NS.RefreshTimerUI()
       end
-    elseif event == "COMBAT_LOG_EVENT_UNTRUSTED" then
-      TrackDeathCLEU()
     elseif event == "PLAYER_ENTERING_WORLD" then
       -- Reload inside an active run: rebuild state from the APIs.
       C_Timer.After(2, function()

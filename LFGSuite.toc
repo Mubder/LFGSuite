@@ -6,7 +6,9 @@
 ## SavedVariables: LFGSuiteDB
 ## IconTexture: Interface\Icons\INV_Misc_GroupNeedMore
 
-Bindings.xml
+## Note: Bindings.xml is NOT listed - the client auto-loads it by filename;
+## listing it makes the loader parse it as widget XML (Midnight warnings).
+
 Locales\enUS.lua
 Core.lua
 Services.lua
