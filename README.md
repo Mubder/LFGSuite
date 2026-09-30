@@ -40,6 +40,25 @@ Status: **alpha** — all modules implemented, undergoing in-game testing. Every
 - Lint: `luacheck .` (config in `.luacheckrc`; CI runs it on every push/PR).
 - Releasing: tag `vX.Y.Z` and the BigWigs packager builds the CurseForge zip from `.pkgmeta`.
 
+### Offline UI preview (no game client)
+
+[osso/wow-ui-sim](https://github.com/Osso/wow-ui-sim) runs the real Blizzard UI plus this
+addon headlessly and renders screenshots. Setup (one-time): unzip the Windows build into
+`.sim/wow-ui-sim/`, junction the repo as `Interface\AddOns\LFGSuite` inside it, and point
+`WOW_INSTALL_PATH` at your WoW install (used for textures via CASC). Then:
+
+```
+.sim/sim.sh keystones     # SOLO scene: only that module enabled + its UI
+                          # (keystones browser queue applicants timer forces
+                          #  runsummary loot roster) -> .sim/shots/<module>.png
+.sim/sim.sh all           # every window in one scene -> .sim/shots/all.png
+.sim/sim.sh gui           # interactive windowed UI (type /lfgs, click around)
+.sim/sim.sh tree          # frame-tree dump (also shows print() output)
+```
+
+Edit a module, re-run its solo scene, compare the screenshot - the whole loop
+takes seconds and never launches WoW. `.sim/` is gitignored.
+
 ## Credits & licensing
 
 MIT (see `LICENSE`). All code is original. Feature inspiration (no code copied — several sources are ARR/GPL) from: Astral Keys, Better Keystone Display, BetterBlizzQueue, Details! Mythic+, IFTL, KeystoneLoot, LFG Inspect, MKS Helper, Mythic Plus Tweaks, Premade Sort, Premade Groups Filter, Premade Regions, WarpDeplete, AlterEgo, MythicPlusCount — and our own LFGAlert, whose applicant tracking + log window this addon succeeds.

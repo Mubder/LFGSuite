@@ -12,8 +12,9 @@
 --       rewards are waiting (C_WeeklyRewards probes)
 --   [x] Raid lockout overview (mouse over a row: locked instances + reset time)
 --   [x] Optional instance-reset announcement to party (default OFF)
+--   [x] Gear snapshot: equipped vs bag average item level on the row tooltip
+--       (cross-alt equipment overview; per-slot inspection stays open)
 --   [ ] Seasonal currencies (needs verified Midnight currency IDs)
---   [ ] Equipment inspection across alts
 --   [ ] Click-to-teleport (needs the dungeon teleport spell table)
 
 LFGSuite = LFGSuite or {}
@@ -103,6 +104,7 @@ local function SnapshotChar()
     class = class,
     level = UnitLevel and UnitLevel("player") or nil,
     ilvl = math.floor((avgEquipped or avgTotal or 0) + 0.5),
+    ilvlTotal = avgTotal and math.floor(avgTotal + 0.5) or nil, -- bag average
     rating = Probe(C_MythicPlus and C_MythicPlus.GetOverallDungeonScore) or 0,
     key = key,
     vault = vaultU and { unlocked = vaultU, total = vaultT } or nil,
@@ -125,7 +127,7 @@ local function BuildRows()
   for name, e in pairs(db.chars or {}) do
     if type(e) == "table" then
       out[#out + 1] = { name = name, class = e.class, ilvl = e.ilvl or 0,
-        rating = e.rating or 0, key = e.key, vault = e.vault,
+        ilvlTotal = e.ilvlTotal, rating = e.rating or 0, key = e.key, vault = e.vault,
         lockouts = e.lockouts, t = e.t or 0 }
     end
   end
@@ -273,6 +275,11 @@ local function BuildUI()
       if not e then return end
       GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
       GameTooltip:SetText(Util.ClassColorize(e.class, e.name), 1, 1, 1)
+      if e.ilvlTotal and e.ilvlTotal > (e.ilvl or 0) then
+        GameTooltip:AddDoubleLine(l("col_ilvl2", "Item level"),
+          string.format("%d |cff888888(%d %s)|r", e.ilvl or 0, e.ilvlTotal,
+            l("roster_inbags", "in bags")), 1, 1, 1, 1, 1, 1)
+      end
       if e.key then
         GameTooltip:AddDoubleLine(l("col_key", "Key"),
           string.format("+%d %s", e.key.level, e.key.name or "?"), 1, 1, 1, 1, 0.82, 0)

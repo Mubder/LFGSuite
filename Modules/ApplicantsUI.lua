@@ -296,6 +296,33 @@ end
 -- Context menu
 -- ---------------------------------------------------------------------------
 
+-- Persistent-note editor (shared Blizzard popup; data = full name).
+StaticPopupDialogs = StaticPopupDialogs or {}
+StaticPopupDialogs["LFGSUITE_APPLICANT_NOTE"] = {
+  text = l("note_edit_fmt", "Note for %s:"),
+  button1 = SAVE or "Save",
+  button2 = CANCEL or "Cancel",
+  hasEditBox = 1,
+  maxLetters = 140,
+  whileDead = 1,
+  hideOnEscape = 1,
+  timeout = 0,
+  preferredIndex = 5,
+  OnShow = function(self, data)
+    self.editBox:SetMaxLetters(140)
+    self.editBox:SetText((data and A.GetNote and A.GetNote(data)) or "")
+    self.editBox:SetFocus()
+  end,
+  OnAccept = function(self, data)
+    if data and A.SetNote then A.SetNote(data, self.editBox:GetText()) end
+  end,
+  EditBoxOnEnterPressed = function(self)
+    local parent = self:GetParent()
+    if parent.data and A.SetNote then A.SetNote(parent.data, self:GetText()) end
+    parent:Hide()
+  end,
+}
+
 local function ShowRowMenu(anchor, entry)
   if not entry or entry.separator or not entry.members or not entry.members[1] then return end
   local mem = entry.members[1]
@@ -319,6 +346,10 @@ local function ShowRowMenu(anchor, entry)
           A.DeclineApplicantByID(applicantID)
         end)
       end
+      root:CreateDivider()
+      root:CreateButton(l("m_note", "Edit note"), function()
+        StaticPopup_Show("LFGSUITE_APPLICANT_NOTE", ShortName(fullName), nil, fullName)
+      end)
       root:CreateDivider()
       root:CreateButton(l("m_copy_name", "Copy name"), function()
         local eb = ChatEdit_ChooseBoxForSend()
@@ -346,6 +377,9 @@ local function ShowRowMenu(anchor, entry)
     menu[#menu + 1] = { text = l("m_decline", "Decline applicant"), notCheckable = true,
       func = function() A.DeclineApplicantByID(applicantID) end }
   end
+  menu[#menu + 1] = { text = l("m_note", "Edit note"), notCheckable = true, func = function()
+      StaticPopup_Show("LFGSUITE_APPLICANT_NOTE", ShortName(fullName), nil, fullName)
+    end }
   EasyMenu(menu, LFGSuiteApplicantsDropMenu, "cursor", 0, 0, "MENU")
 end
 
@@ -515,6 +549,12 @@ local function MakeRow(i)
       local line = (m.specName and (m.specName .. " ") or "") .. (m.class or "")
       GameTooltip:AddLine(line, 1, 0.82, 0)
     end
+    if A.GetNote then
+      local note = A.GetNote(m.name)
+      if note then
+        GameTooltip:AddLine(l("tt_note", "Note") .. ": |cffffd100" .. note .. "|r", 1, 1, 1, true)
+      end
+    end
     local roleTag = A.RoleTag(A.ResolveRole(m))
     GameTooltip:AddDoubleLine(l("tt_role", "Role"), roleTag, 1, 1, 1, 1, 1, 1)
     if e.dungeon or e.key then
@@ -624,9 +664,22 @@ local function EntryColumns(entry)
     local scoreNum = (m.rioScore and m.rioScore > 0) and m.rioScore or (m.dungeonScore or 0)
     scoreTxt = (scoreNum and scoreNum > 0) and tostring(math.floor(scoreNum)) or "-"
   end
-  local nameTxt = star .. ClassColorize(m.class, Trunc(ShortName(m.name), 18))
+  local nameTxt = star .. ClassColorize(m.class, Trunc(ShortName(m.name), 14))
   if (entry.numMembers or 1) > 1 then
     nameTxt = nameTxt .. " |cffaaaaaa+" .. ((entry.numMembers or 1) - 1) .. "|r"
+  end
+  -- Region tag (Premade Regions-style): the applicant's realm when it is
+  -- not our own - inside a region that is the practical "where from".
+  do
+    local _, realm = strsplit("-", m.name or "", 2)
+    local myRealm = (GetRealmName() or ""):gsub("%s", "")
+    if realm and realm ~= "" and realm:gsub("%s", ""):lower() ~= myRealm:lower() then
+      nameTxt = nameTxt .. " |cff9ec1e8" .. Trunc(realm:gsub("%s", ""), 9) .. "|r"
+    end
+  end
+  -- Persistent note marker (hover to read, right-click to edit).
+  if A.GetNote and A.GetNote(m.name) then
+    nameTxt = "|cffffd100★|r" .. nameTxt
   end
   cols.name = nameTxt
   cols.role = A.RoleTag(A.ResolveRole(m))

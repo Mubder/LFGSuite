@@ -10,7 +10,8 @@
 --   [x] Party roster line (names, class colors, roles)
 --   [x] Auto-show once, dismiss by click, /lfgs summary reopens while the
 --       data lasts; NO damage/healing breakdown (Details' job)
---   [ ] Forces completion time + timeline (needs Forces history tracking)
+--   [x] Forces timeline (25/50/75/100% marks) from the Forces module's
+--       per-run history; /lfgs summary demo fabricates one
 
 LFGSuite = LFGSuite or {}
 local NS = LFGSuite
@@ -185,6 +186,25 @@ local function ShowPanel(run)
     lines[#lines + 1] = string.format("   %s: |cffee6666%d|r (|cff999999-5s each|r)",
       l("deaths", "Deaths"), run.deaths)
   end
+  -- Forces timeline (recorded by the Forces module during the run):
+  -- "25% 6:10 · 50% 12:44 · 75% 19:02 · 100% 24:12" (relative to first tick).
+  if type(NS.ForcesHistory) == "table" and #NS.ForcesHistory >= 2 then
+    local t0 = NS.ForcesHistory[1].t
+    local marks, seen = {}, {}
+    for _, want in ipairs({ 25, 50, 75, 100 }) do
+      for _, e in ipairs(NS.ForcesHistory) do
+        if not seen[want] and e.pct >= want then
+          seen[want] = true
+          marks[#marks + 1] = string.format("%d%% %s", math.floor(e.pct + 0.5), FmtTime(math.max(0, e.t - t0)))
+          break
+        end
+      end
+    end
+    if #marks > 0 then
+      lines[#lines + 1] = string.format("%s: |cffffffff%s|r",
+        l("forces_timeline", "Forces"), table.concat(marks, "  ·  "))
+    end
+  end
   if run.oldScore and run.newScore and run.newScore > run.oldScore then
     lines[#lines + 1] = string.format("%s: |cff55ff55%d → %d (+%d)|r", l("sum_rating", "Rating"),
       run.oldScore, run.newScore, run.newScore - run.oldScore)
@@ -272,7 +292,26 @@ local M = {
 NS.RegisterModule(M)
 
 NS.SlashHandlers = NS.SlashHandlers or {}
-NS.SlashHandlers.summary = function()
+NS.SlashHandlers.summary = function(rest)
+  if rest == "demo" then
+    -- Preview panel with fabricated data (timer demo's sibling). mapID 0
+    -- keeps the demo out of the personal-best store: PB.Update never records
+    -- a run for a map the player cannot actually complete.
+    local now = time()
+    NS.ForcesHistory = {
+      { t = now - 930, pct = 0 }, { t = now - 870, pct = 12 },
+      { t = now - 800, pct = 27 }, { t = now - 730, pct = 44 },
+      { t = now - 660, pct = 58 }, { t = now - 580, pct = 76 },
+      { t = now - 500, pct = 91 }, { t = now - 435, pct = 100 },
+    }
+    ShowPanel({
+      mapID = 0, level = 7, mapName = l("sum_demo_name", "Demo Run"),
+      time = 1599.5, timeLimit = 1800, onTime = true, upgrade = 2,
+      deaths = 2, oldScore = 2450, newScore = 2487,
+      practice = false, forceShow = true,
+    })
+    return
+  end
   local run = lastRun
   if not run then
     NS.Print(l("sum_none", "No completed run this session."))

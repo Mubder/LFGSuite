@@ -20,6 +20,7 @@ local DEFAULTS = {
   enabled = true,
   showMinimapButton = true,
   minimapAngle = 200,
+  theme = { bgOpacity = 0.35 }, -- module background opacity (0 transparent - 1 solid)
   modules = {}, -- modules[key] = { enabled = bool }; seeded from module defs
 }
 
@@ -281,22 +282,25 @@ SlashCmdList["LFGSUITE"] = function(msg)
     NS.SyncEventRegistrations()
     local state = NS.db.enabled and ("|cff33cc33" .. l("on", "ON") .. "|r") or ("|cffff4444" .. l("off", "OFF") .. "|r")
     NS.Print("LFG Suite " .. state)
+  elseif cmd ~= "" and NS.ModulesByName[cmd] and (rest == "on" or rest == "off") then
+    -- Explicit enable/disable always controls the module, even when the
+    -- module key is also a subcommand (/lfgs timer off).
+    NS.SetModuleEnabled(cmd, rest == "on")
+  elseif NS.SlashHandlers and NS.SlashHandlers[cmd] then
+    -- Module subcommands. Checked BEFORE the module-toggle branch: several
+    -- subcommand names equal their module key (timer, forces, applicants,
+    -- roster, loot) and used to be eaten by the toggle - /lfgs timer demo
+    -- disabled the module instead of demoing the timer.
+    local ok, err = pcall(NS.SlashHandlers[cmd], rest)
+    if not ok then NS.Print("|cffff5555/" .. cmd .. " error: " .. tostring(err) .. "|r") end
   elseif cmd ~= "" and NS.ModulesByName[cmd] then
-    -- /lfgs keystones on|off|toggle
+    -- Bare module name (/lfgs keystones): toggle it.
     local def = NS.ModulesByName[cmd]
-    if rest == "on" or rest == "off" then
-      NS.SetModuleEnabled(cmd, rest == "on")
-    else
-      NS.SetModuleEnabled(cmd, not NS.IsModuleEnabled(cmd))
-    end
+    NS.SetModuleEnabled(cmd, not NS.IsModuleEnabled(cmd))
     if def.status == "planned" then
       local note = l("status_planned", "planned - not implemented yet (phase %s)"):format(tostring(def.phase))
       NS.Print("|cffffcc00" .. def.label .. ": " .. note .. "|r")
     end
-  elseif NS.SlashHandlers and NS.SlashHandlers[cmd] then
-    -- Module subcommands: /lfgs keys, /lfgs affixes, /lfgs refresh, ...
-    local ok, err = pcall(NS.SlashHandlers[cmd], rest)
-    if not ok then NS.Print("|cffff5555/" .. cmd .. " error: " .. tostring(err) .. "|r") end
   else
     print("|cffffcc00" .. l("help_header", "LFG Suite commands:") .. "|r")
     print("  " .. l("help_config", "/lfgs config - open settings"))

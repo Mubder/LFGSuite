@@ -6,12 +6,14 @@
 --       (SCENARIO_CRITERIA_UPDATE probe - no-op silently if Blizzard moved it),
 --       in-pull highlight, gold at 100%
 --   [x] Per-mob enemy forces % on unit tooltips (from the teachable DB)
+--   [x] Per-mob % on BLIZZARD nameplates (taught mobs only; Plater/ElvUI/KUI
+--        plates are never touched)
+--   [x] Pull-size estimate on the bar (sum of taught % on visible plates)
+--   [x] Run history: forces timeline recorded per run, shown by RunSummary
 --   [x] Teach mode: /lfgs forces teach <count> with a mob targeted;
 --        /lfgs forces mobs lists what you taught for this dungeon
 --   [x] Starter data: ships empty; the community teaches it (MPC model).
 --        Later releases can bundle a mined table for current-season dungeons.
---   [ ] Per-mob % ON nameplates (Blizzard/Plater/ElvUI/KUI) - tooltip only for now
---   [ ] Pull counter (sum of in-combat mobs)
 --
 -- DB shape: db.forces.counts[mapID][npcID] = count (whole-percent points).
 
@@ -31,6 +33,20 @@ local FORCES_DEFAULTS = {
 local function MDB() return NS.EnsureModuleDB("forces", FORCES_DEFAULTS) end
 
 local state = { active = false, mapID = nil, qty = 0, total = nil }
+
+-- Live forces snapshot for other modules (the Timer shows "% remains").
+function NS.ForcesInfo()
+  if not (state.active and state.total and state.total > 0) then return nil end
+  local pct = math.min(100, (state.qty / state.total) * 100)
+  return { pct = pct, qty = state.qty, total = state.total, remains = 100 - pct }
+end
+
+local function NpcIDFromGUID(guid)
+  if type(guid) ~= "string" then return nil end
+  if not guid:find("^Creature-") then return nil end
+  local npcID = select(6, strsplit("-", guid))
+  return tonumber(npcID)
+end
 
 -- ---------------------------------------------------------------------------
 -- Live forces % via the scenario criteria system
@@ -54,10 +70,53 @@ local function ProbeForcesCriteria()
   return nil, nil
 end
 
+-- ---------------------------------------------------------------------------
+-- Run history (consumed by RunSummary's forces timeline) + pull estimator
+-- ---------------------------------------------------------------------------
+
+-- [{ t = wallclock, pct }] sampled whenever forces move >= 2 points; reset
+-- on run start, frozen at completion for the summary panel.
+NS.ForcesHistory = nil
+
+local function RecordHistory()
+  if not (state.active and state.total and state.qty) then return end
+  local pct = math.min(100, (state.qty / state.total) * 100)
+  local h = NS.ForcesHistory
+  local last = h and h[#h]
+  if (not last) or (pct - last.pct) >= 2 or pct >= 100 then
+    h = h or {}
+    h[#h + 1] = { t = time(), pct = pct }
+    while #h > 80 do table.remove(h, 1) end
+    NS.ForcesHistory = h
+  end
+end
+
+-- Rough "what is this pull worth" estimate: sum the taught per-mob % of
+-- every enemy nameplate currently shown. Missing/taught-nothing mobs simply
+-- contribute nothing - the estimate is a hint, never a claim.
+local function PullEstimate()
+  if not (C_NamePlate and C_NamePlate.GetNamePlates and state.mapID) then return nil end
+  local counts = MDB().counts[tostring(state.mapID)]
+  if not counts then return nil end
+  local ok, plates = pcall(C_NamePlate.GetNamePlates)
+  if not (ok and type(plates) == "table") then return nil end
+  local sum, n = 0, 0
+  for _, plate in ipairs(plates) do
+    local unit = plate.namePlateUnitToken
+    local guid = unit and UnitGUID(unit)
+    local npc = guid and NpcIDFromGUID(guid)
+    local c = npc and counts[tostring(npc)]
+    if c then sum, n = sum + c, n + 1 end
+  end
+  if sum <= 0 then return nil end
+  return math.min(100, sum), n
+end
+
 local function RefreshForces()
   local qty, total = ProbeForcesCriteria()
   if total then
     state.qty, state.total = qty, total
+    RecordHistory()
   end
   NS.RefreshForcesUI()
 end
@@ -65,13 +124,6 @@ end
 -- ---------------------------------------------------------------------------
 -- Per-mob tooltips (teachable DB)
 -- ---------------------------------------------------------------------------
-
-local function NpcIDFromGUID(guid)
-  if type(guid) ~= "string" then return nil end
-  if not guid:find("^Creature-") then return nil end
-  local npcID = select(6, strsplit("-", guid))
-  return tonumber(npcID)
-end
 
 local function MobCount(npcID)
   if not (npcID and state.mapID) then return nil end
@@ -117,13 +169,21 @@ function NS.RefreshForcesUI()
   frame.bar:SetValue(pct / 100)
   local r, g, b = 0.85, 0.68, 0.3
   if pct >= 100 then
-    r, g, b = 0.3, 1, 0.4
+    r, g, b = 1, 0.82, 0.3 -- gold when the run's forces are done
   elseif state.inCombat then
     r, g, b = 1, 0.85, 0.2
   end
   frame.bar:SetStatusBarColor(r, g, b)
-  frame.text:SetText(string.format("%s: %.1f%%  |cff888888(%d / %d)|r",
-    l("forces_label", "Enemy Forces"), pct, state.qty, state.total))
+  local text = string.format("%s: %.1f%%  |cff888888(%d / %d)|r",
+    l("forces_label", "Enemy Forces"), pct, state.qty, state.total)
+  if db.showPull ~= false then
+    local pull, n = PullEstimate()
+    if pull then
+      text = text .. string.format("  |cffcccccc%s |cffffd100~%d%%|r|cffcccccc (%d)|r",
+        l("pull_lbl", "pull"), pull, n)
+    end
+  end
+  frame.text:SetText(text)
 end
 
 local function BuildUI()
@@ -167,6 +227,33 @@ local function BuildUI()
   end
 end
 
+-- Per-mob forces % ON BLIZZARD NAMEPLATES (taught mobs only). Other-plate
+-- addons (Plater/ElvUI/KUI) are never touched; untaught plates get nothing.
+local function UpdateNameplateTag(unitToken)
+  if MDB().showPlates == false then return end
+  if not unitToken then return end
+  local plate = C_NamePlate and C_NamePlate.GetNamePlateForUnit
+    and select(2, pcall(C_NamePlate.GetNamePlateForUnit, unitToken))
+  if not plate then return end
+  local guid = UnitGUID(unitToken)
+  local npc = NpcIDFromGUID(guid)
+  local counts = state.mapID and MDB().counts[tostring(state.mapID)]
+  local count = npc and counts and counts[tostring(npc)]
+  if not count then
+    if plate._lfgsForces then plate._lfgsForces:Hide() end
+    return
+  end
+  local fs = plate._lfgsForces
+  if not fs then
+    fs = plate:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    fs:SetPoint("BOTTOM", plate, "TOP", 0, -2)
+    fs:SetTextColor(1, 0.82, 0)
+    plate._lfgsForces = fs
+  end
+  fs:SetText("|cffffd100+" .. count .. "%|r")
+  fs:Show()
+end
+
 -- ---------------------------------------------------------------------------
 -- Module
 -- ---------------------------------------------------------------------------
@@ -181,7 +268,7 @@ local M = {
   events = {
     "CHALLENGE_MODE_START", "SCENARIO_CRITERIA_UPDATE", "CHALLENGE_MODE_COMPLETED",
     "CHALLENGE_MODE_RESET", "PLAYER_ENTERING_WORLD", "PLAYER_REGEN_DISABLED",
-    "PLAYER_REGEN_ENABLED",
+    "PLAYER_REGEN_ENABLED", "NAME_PLATE_UNIT_ADDED",
   },
   OnLoad = function()
     MDB()
@@ -197,10 +284,11 @@ local M = {
     state.active = false
     if frame then frame:Hide() end
   end,
-  OnEvent = function(_, event)
+  OnEvent = function(_, event, arg1)
     if event == "CHALLENGE_MODE_START" then
       state.active = true
       state.qty, state.total = 0, nil
+      NS.ForcesHistory = nil -- fresh timeline for this run
       if C_ChallengeMode and C_ChallengeMode.GetActiveChallengeMapID then
         local ok, mapID = pcall(C_ChallengeMode.GetActiveChallengeMapID)
         if ok and mapID then state.mapID = mapID end
@@ -214,7 +302,11 @@ local M = {
     elseif event == "PLAYER_REGEN_ENABLED" then
       state.inCombat = false
       NS.RefreshForcesUI()
+    elseif event == "NAME_PLATE_UNIT_ADDED" then
+      UpdateNameplateTag(arg1)
     elseif event == "CHALLENGE_MODE_COMPLETED" or event == "CHALLENGE_MODE_RESET" then
+      -- COMPLETED keeps the frozen history for RunSummary; RESET clears it.
+      if event == "CHALLENGE_MODE_RESET" then NS.ForcesHistory = nil end
       state.active = false
       if frame then frame:Hide() end
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -237,6 +329,12 @@ local M = {
     ctx.AddCB(l("opt_f_tt", "Show per-mob forces % on tooltips (taught mobs only)"),
       function() return MDB().showTooltips ~= false end,
       function(v) MDB().showTooltips = v end)
+    ctx.AddCB(l("opt_f_plates", "Show per-mob forces % on nameplates (taught mobs only)"),
+      function() return MDB().showPlates ~= false end,
+      function(v) MDB().showPlates = v end)
+    ctx.AddCB(l("opt_f_pull", "Show pull-size estimate on the forces bar"),
+      function() return MDB().showPull ~= false end,
+      function(v) MDB().showPull = v; NS.RefreshForcesUI() end)
   end,
 }
 NS.RegisterModule(M)
@@ -283,6 +381,17 @@ NS.SlashHandlers.forces = function(rest)
     for npcID, count in pairs(mapCounts) do
       print(string.format("   npc %s: +%d%%", tostring(npcID), count))
     end
+  elseif cmd == "demo" then
+    -- Preview the bar with fabricated progress (timer demo's sibling).
+    if arg == "off" then
+      state.active = false
+      NS.RefreshForcesUI()
+      return
+    end
+    state.active = true
+    state.qty, state.total = 126, 185
+    BuildUI()
+    NS.RefreshForcesUI()
   elseif cmd == "reset" then
     if state.mapID then
       MDB().counts[tostring(state.mapID)] = {}
@@ -291,6 +400,7 @@ NS.SlashHandlers.forces = function(rest)
   else
     NS.Print("/lfgs forces teach <count> - teach the targeted mob's forces value")
     NS.Print("/lfgs forces mobs - list taught mobs for this dungeon")
+    NS.Print("/lfgs forces demo [off] - preview the progress bar")
     NS.Print("/lfgs forces reset - clear taught data for this dungeon")
   end
 end

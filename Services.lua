@@ -210,3 +210,137 @@ function Comms.OnMessage(prefix, msg, channel, sender)
 end
 
 NS.Comms = Comms
+
+-- ---------------------------------------------------------------------------
+-- Theme - the shared look for module windows (pilot: Timer). Every module
+-- window gets: a light transparent block background, a slightly stronger
+-- grabbable header strip, and custom gradient bars. Opacity is one account
+-- wide setting (settings panel slider or /lfgs theme bg <0-100>).
+-- ---------------------------------------------------------------------------
+
+local Theme = NS.Theme or { frames = {} }
+NS.Theme = Theme
+
+local L = NS.L or {}
+local function tl(key, fallback) return L[key] or fallback end
+
+local function ThemeDB()
+  NS.db = NS.db or {}
+  if type(NS.db.theme) ~= "table" then NS.db.theme = {} end
+  if NS.db.theme.bgOpacity == nil then NS.db.theme.bgOpacity = 0.35 end
+  return NS.db.theme
+end
+
+-- Repaint one themed frame at the current opacity.
+function Theme.Paint(frame)
+  local t = frame and frame._lfgsTheme
+  if not t then return end
+  local op = ThemeDB().bgOpacity
+  t.bg:SetColorTexture(0.05, 0.07, 0.12, op)
+  t.header:SetColorTexture(0.10, 0.15, 0.24, math.min(0.9, op + 0.20))
+end
+
+-- Attach block background + header strip to a frame (idempotent). The
+-- header strip is the grab affordance: it is ALWAYS draggable (onMove, if
+-- given, runs after a drag to persist the position); the frame body stays
+-- click-through so stray clicks mid-run neither move the window nor get
+-- swallowed.
+function Theme.Apply(frame, onMove)
+  if not frame then return nil end
+  if not frame._lfgsTheme then
+    local bg = frame:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetDrawLayer("BACKGROUND", -8)
+    local header = frame:CreateTexture(nil, "BACKGROUND")
+    header:SetHeight(24)
+    header:SetPoint("TOPLEFT", frame, "TOPLEFT")
+    header:SetPoint("TOPRIGHT", frame, "TOPRIGHT")
+    header:SetDrawLayer("BACKGROUND", -7)
+    local accent = frame:CreateTexture(nil, "BACKGROUND")
+    accent:SetHeight(1)
+    accent:SetPoint("TOPLEFT", header, "BOTTOMLEFT")
+    accent:SetPoint("TOPRIGHT", header, "BOTTOMRIGHT")
+    accent:SetColorTexture(0.85, 0.68, 0.3, 0.55)
+    accent:SetDrawLayer("BACKGROUND", -6)
+    local drag = CreateFrame("Frame", nil, frame)
+    drag:SetHeight(24)
+    drag:SetPoint("TOPLEFT", frame, "TOPLEFT")
+    drag:SetPoint("TOPRIGHT", frame, "TOPRIGHT")
+    drag:EnableMouse(true)
+    drag:RegisterForDrag("LeftButton")
+    drag:SetScript("OnDragStart", function()
+      if frame.IsMovable and frame:IsMovable() then frame:StartMoving() end
+    end)
+    drag:SetScript("OnDragStop", function()
+      frame:StopMovingOrSizing()
+      if type(onMove) == "function" then pcall(onMove, frame) end
+    end)
+    frame._lfgsTheme = { bg = bg, header = header, accent = accent, drag = drag }
+    Theme.frames[#Theme.frames + 1] = frame
+  end
+  Theme.Paint(frame)
+  return frame._lfgsTheme
+end
+
+function Theme.RefreshAll()
+  for _, f in ipairs(Theme.frames) do Theme.Paint(f) end
+end
+
+-- Custom progress bar: gradient fill (bright leading edge -> base color),
+-- dark track, optional pulse flash (overtime). Returns a Frame with
+-- :Set(fraction, r, g, b) and :SetPulse(bool). Ticks can be textured onto
+-- it like any frame.
+function Theme.CreateBar(parent, width, height)
+  local bar = CreateFrame("Frame", nil, parent)
+  bar:SetSize(width, height)
+  local track = bar:CreateTexture(nil, "BACKGROUND")
+  track:SetAllPoints()
+  track:SetColorTexture(0.05, 0.07, 0.12, 0.55)
+  local fill = bar:CreateTexture(nil, "ARTWORK")
+  fill:SetHeight(height)
+  fill:SetPoint("TOPLEFT", bar, "TOPLEFT")
+  fill:SetPoint("BOTTOMLEFT", bar, "BOTTOMLEFT")
+  fill:SetWidth(0)
+  local function PaintFill(r, g, b)
+    local ok = pcall(function()
+      fill:SetGradient("HORIZONTAL",
+        CreateColor(math.min(1, r * 1.35 + 0.08), math.min(1, g * 1.25 + 0.08),
+          math.min(1, b * 1.25 + 0.10), 1),
+        CreateColor(r, g, b, 1))
+    end)
+    if not ok then fill:SetColorTexture(r, g, b, 1) end
+  end
+  bar._pulse = false
+  bar:SetScript("OnUpdate", function(self)
+    if not self._pulse then return end
+    fill:SetAlpha(0.65 + 0.35 * math.abs(math.sin(GetTime() * 4)))
+  end)
+  function bar:Set(frac, r, g, b)
+    frac = math.max(0, math.min(1, frac or 0))
+    fill:SetWidth(math.max(1, width * frac))
+    PaintFill(r or 1, g or 1, b or 1)
+    if not self._pulse then fill:SetAlpha(1) end
+  end
+  function bar:SetPulse(on)
+    self._pulse = on and true or false
+    if not self._pulse then fill:SetAlpha(1) end
+  end
+  return bar
+end
+
+NS.SlashHandlers = NS.SlashHandlers or {}
+NS.SlashHandlers.theme = function(rest)
+  local cmd, arg = rest:match("^(%S*)%s*(.-)$")
+  if cmd == "bg" then
+    local v = tonumber(arg)
+    if v and v >= 0 and v <= 100 then
+      ThemeDB().bgOpacity = v / 100
+      Theme.RefreshAll()
+      NS.Print(string.format(tl("theme_bg_fmt", "Background opacity set to %d%%."), v))
+    else
+      NS.Print(tl("theme_bg_usage", "Usage: /lfgs theme bg <0-100>"))
+    end
+  else
+    NS.Print("/lfgs theme bg <0-100> - module background opacity")
+  end
+end

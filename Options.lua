@@ -177,6 +177,27 @@ function NS.BuildOptions()
     y = y - 30
     return cb
   end
+  local function AddSlider(label, minV, maxV, step, get, set)
+    local s
+    local ok = pcall(function() s = CreateFrame("Slider", nil, content, "OptionsSliderTemplate") end)
+    if not (ok and s) then
+      s = CreateFrame("Slider", nil, content)
+      pcall(function() s:SetOrientation("HORIZONTAL") end)
+      s:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+    end
+    s:SetMinMaxValues(minV, maxV)
+    s:SetValueStep(step)
+    s:SetWidth(300)
+    s:SetHeight(18)
+    if s.Text then s.Text:SetText(label) end
+    if s.Low then s.Low:SetText(tostring(minV)) end
+    if s.High then s.High:SetText(tostring(maxV)) end
+    s:SetPoint("TOPLEFT", content, "TOPLEFT", 24, y)
+    y = y - 40
+    s:SetScript("OnValueChanged", function(_, v) set(v) end)
+    s:SetScript("OnShow", function() s:SetValue(get()) end)
+    return s
+  end
   local function Note(text, h)
     local d = content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     d:SetPoint("TOPLEFT", content, "TOPLEFT", 24, y)
@@ -209,6 +230,20 @@ function NS.BuildOptions()
   AddCB(l("cb_minimap", "Show minimap button (left: settings, right: module list)"),
     function() return NS.db.showMinimapButton ~= false end,
     function(v) NS.db.showMinimapButton = v; if mmButton then mmButton:SetShown(v) end end)
+
+  Section(l("sec_theme", "Theme"))
+  AddSlider(l("opt_bgopacity", "Module background opacity (%)"), 0, 100, 5,
+    function()
+      NS.db.theme = NS.db.theme or { bgOpacity = 0.35 }
+      return math.floor((NS.db.theme.bgOpacity or 0.35) * 100 + 0.5)
+    end,
+    function(v)
+      NS.db.theme = NS.db.theme or {}
+      NS.db.theme.bgOpacity = v / 100
+      if NS.Theme and NS.Theme.RefreshAll then NS.Theme.RefreshAll() end
+    end)
+  Note(l("note_theme", "0 = fully transparent, 100 = solid. Header strips stay slightly "
+    .. "stronger so blocks remain easy to grab and drag. Quick change: /lfgs theme bg <0-100>."), 34)
 
   Section(l("sec_modules", "Modules"))
   Note(l("note_modules", "Each module is independent. Modules marked 'planned' are "

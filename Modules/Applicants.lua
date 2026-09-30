@@ -17,9 +17,10 @@
 --   [x] Session separators + per-listing/all-time stats
 --   [x] Interop: stays silent while LFGAlert is enabled (no double alerts)
 --   [x] /lfgs import - pull settings/log/stats from LFGAlertDB
---   [ ] Applicant region tags (Premade Regions)
---   [ ] Persistent per-applicant notes (LFG Inspect)
---   [ ] Non-leader applicant tooltips + notes (LFG Inspect)
+--   [x] Applicant region tags (realm shown when it differs from yours)
+--   [x] Persistent per-applicant notes (right-click -> Edit note; ★ marker)
+--   [x] Non-leader applicant view: group members track + read the log with
+--       notes/tooltips; alerts + auto-decline stay leader-only
 
 LFGSuite = LFGSuite or {}
 local NS = LFGSuite
@@ -44,12 +45,31 @@ local APPLICANTS_DEFAULTS = {
   maxLogEntries = 300,
   stats = { sessions = {}, total = { queued = 0, invited = 0, accepted = 0, declined = 0, auto = 0, gone = 0 } },
   log = {},
+  notes = {}, -- [fullName] = persistent note (survives sessions; LFG Inspect-style)
 }
 
 local A = NS.A or {}
 NS.A = A
 local function DB() return NS.EnsureModuleDB("applicants", APPLICANTS_DEFAULTS) end
 A.db = DB
+
+-- Persistent per-applicant notes (right-click a log row -> Edit note).
+function A.GetNote(fullName)
+  local notes = DB().notes
+  if type(notes) == "table" then return notes[fullName] end
+  return nil
+end
+
+function A.SetNote(fullName, text)
+  if not (type(fullName) == "string" and fullName ~= "") then return end
+  local db = DB()
+  db.notes = db.notes or {}
+  if type(text) == "string" and text:match("%S") then
+    db.notes[fullName] = text
+  else
+    db.notes[fullName] = nil
+  end
+end
 
 -- ---------------------------------------------------------------------------
 -- LFGAlert interop: never double-alert while the original addon is running.
@@ -716,6 +736,10 @@ local function HandleApplicantGone(applicantID)
   A.AnnounceStatusChange(applicantID, old, newStatus, prev.snap)
 end
 
+-- Alerts + auto-decline are leader-only; non-leader group members still
+-- track + render the applicant list (read-only).
+local amLeader = true
+
 local function HandleApplicantSnapshot(applicantID, snap, reason)
   if not snap then return end
   local prev = known[applicantID]
@@ -723,8 +747,10 @@ local function HandleApplicantSnapshot(applicantID, snap, reason)
     known[applicantID] = { status = snap.status, snap = snap }
     A.AddLogEntry(applicantID, nil, snap.status or "applied", snap, true)
     if snap.status == "applied" then
-      A.AlertNewApplicant(applicantID, snap)
-      A.MaybeAutoDecline(applicantID, snap)
+      if amLeader then
+        A.AlertNewApplicant(applicantID, snap)
+        A.MaybeAutoDecline(applicantID, snap)
+      end
     else
       A.AnnounceStatusChange(applicantID, nil, snap.status, snap)
     end
@@ -733,7 +759,7 @@ local function HandleApplicantSnapshot(applicantID, snap, reason)
     known[applicantID] = { status = snap.status, snap = snap }
     A.AddLogEntry(applicantID, old, snap.status, snap, false)
     A.AnnounceStatusChange(applicantID, old, snap.status, snap)
-    if snap.status == "applied" and reason == "list" then
+    if amLeader and snap.status == "applied" and reason == "list" then
       A.PlayAlertSound()
     end
   else
@@ -753,7 +779,9 @@ local function ScanApplicants(reason, retryN)
   if not NS.IsModuleEnabled("applicants") then return end
   if LFGAlertActive() then NoteInterop() return end
   if not HasActiveListing() then return end
-  if not IsGroupLeader() then return end
+  -- Leaders act; any group member may still watch (read-only log + notes).
+  amLeader = IsGroupLeader()
+  if not amLeader and not (IsInGroup and IsInGroup()) then return end
   if not C_LFGList.GetApplicants then return end
 
   -- A listing can be active before its event reaches us (login timing):

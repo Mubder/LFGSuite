@@ -166,14 +166,12 @@ NS.RegisterModule{
   in-game on 12.x and fix what the defensive probes can't paper over
   (ScrollButton names, `LFG_LIST_APPLICATION_STATUS_UPDATED`, battlefield wait
   units - all pcall-guarded, worst case a feature silently no-ops).
-- **Phase 2 — vetting (IN PROGRESS - Applicants core shipped).**
-  Shipped: the Applicants module = a full port of LFGAlert's tracking + log
-  window (alerts, lifecycle log, right-click actions, auto-decline, stats,
-  filters, key per row) under `NS.A` / `db.applicants`, plus the LFGAlert
-  interop rule (module goes idle while LFGAlert is enabled; `/lfgs import`
-  pulls LFGAlert settings/log/stats) and `/lfgs applicants ...` commands.
-  Remaining: applicant region tags, persistent applicant notes, non-leader
-  applicant tooltips, Browser advanced filters + member/comp/ignore tooltips.
+- **Phase 2 — vetting (DONE).** Applicants module shipped (LFGAlert port,
+  alerts/log/actions/stats/filters) + the LFGAlert interop/import, applicant
+  region tags, persistent per-applicant notes (right-click -> Edit note),
+  and the non-leader read-only applicant view. Browser phase-2 items also
+  in: filter card bound to the Group Finder (key-level chips + age/score/
+  full), listing tooltip enrichment, signup-dialog role pre-select.
 - **Phase 3 — the run (ALPHA SHIPPED, needs in-game testing).**
   Shipped: Timer (countdown/overtime, +2/+3 cutoffs via `GetPowerLevels` with
   60%/100% fallback, deaths, affixes, personal bests, `/lfgs timer
@@ -182,19 +180,18 @@ NS.RegisterModule{
   ships empty by design), RunSummary (end-of-run panel: time vs cutoffs,
   upgrade result, rating change, deaths, PB + new-PB flag, party roster,
   `/lfgs summary`).
-  Deferred inside Phase 3: boss objective par times, pull-count prediction,
-  per-mob % ON nameplates (Blatter/ElvUI/KUI), forces timeline in summary,
-  full styling options.
-- **Phase 4 — meta (ALPHA SHIPPED, needs in-game testing).**
-  Shipped: Loot Planner (favorites with 3 tiers per character + export/import
-  `/lfgs fav`, groupmate drop alerts via CHAT_MSG_LOOT, journal-driven
-  dungeon loot browser `/lfgs loot` - degrades to an "unavailable" note if the
-  client's journal API shape differs), Alt Roster (per-char snapshot of
-  rating/ilvl/key/vault/lockouts, sortable account-wide window `/lfgs roster`,
-  Great Vault login notification, optional instance-reset announcement).
-  Deferred inside Phase 4: class/spec/slot loot filters, loot-spec advisor,
-  catalyst browser, dungeon teleports, seasonal currencies, cross-alt
-  equipment inspection, localization pass, CurseForge launch/repo split.
+  Deferred inside Phase 3: full styling presets (Timer), pull-count
+  prediction on the timer (the Forces bar ships a pull-size estimate).
+  Forces per-mob % ships on Blizzard nameplates + tooltips; Plater/ElvUI
+  plates stay untouched. RunSummary shows the forces timeline.
+- **Phase 4 — meta (MOSTLY DONE, needs in-game testing).**
+  Shipped: Loot Planner (favorites with 3 tiers + export/import `/lfgs fav`,
+  groupmate drop alerts, journal loot browser `/lfgs loot`, my-spec + slot
+  filters, loot-spec advisor on zone-in), Alt Roster (per-char snapshots,
+  sortable window, vault notification, lockouts, equipped-vs-bag ilvl).
+  Deferred inside Phase 4: catalyst browser, dungeon teleports (spell
+  table), seasonal currencies (need verified Midnight currency IDs),
+  localization pass, CurseForge launch/repo split.
 
 ## 8. Release strategy
 

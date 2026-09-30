@@ -9,10 +9,15 @@
 --       (LFG_PROPOSAL_SHOW / battleground confirm)
 --   [x] "What did I queue for" banner: on joining a premade group
 --       (LFG_LIST_APPLICATION_STATUS_UPDATED inviteaccepted + group-form
---       fallback) shows group name/leader; dungeon pops show the dungeon
+--       fallback) shows group name + description/comment + leader; dungeon
+--       pops show the dungeon name + description. Stays 2 minutes
+--       (/lfgs-configurable), with a destination card (dungeon name +
+--       countdown, click to dismiss)
 --   [x] Auto-accept queue pops (DEFAULT OFF)
---   [ ] Estimated queue times from history (BetterBlizzQueue deep stats)
---   [ ] Role popup QoL on the LFD role-select dialog
+--   [x] Estimated queue times: last 20 observed join->pop durations per
+--       category; the timer shows "~avg" while queued
+--   [x] Role-check popup QoL: pre-ticks remembered roles on the LFD
+--       role-check dialog
 
 LFGSuite = LFGSuite or {}
 local NS = LFGSuite
@@ -28,6 +33,7 @@ local QUEUE_DEFAULTS = {
   bannerSeconds = 120,
   showTimer = true,
   autoAccept = false, -- deliberately OFF by default
+  history = {}, -- [category] = { observed join->pop seconds, last 20 }
 }
 
 local function MDB() return NS.EnsureModuleDB("queue", QUEUE_DEFAULTS) end
@@ -84,7 +90,73 @@ local function BuildBanner()
 end
 
 local bannerTimer
-function NS.ShowBanner(title, sub)
+local destCard, destTicker
+
+-- m:ss (defined here: the destination card runs before the timer-frame
+-- section below declares its own FormatElapsed).
+local function CardTime(secs)
+  secs = math.floor(secs or 0)
+  return string.format("%d:%02d", math.floor(secs / 60), secs % 60)
+end
+
+-- Small themed card under the banner: where you are heading, for how long
+-- the banner will stay. Click to dismiss both.
+local function EnsureDestCard()
+  if destCard then return destCard end
+  destCard = CreateFrame("Frame", "LFGSuiteDestCard", UIParent)
+  destCard:SetSize(300, 64)
+  destCard:SetFrameStrata("HIGH")
+  destCard:EnableMouse(true)
+  destCard:SetScript("OnMouseUp", function(self)
+    if bannerFrame then bannerFrame:Hide() end
+    self:Hide()
+  end)
+  if NS.Theme and NS.Theme.Apply then NS.Theme.Apply(destCard) end
+  destCard.caption = destCard:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  destCard.caption:SetPoint("TOPLEFT", destCard, "TOPLEFT", 0, -6)
+  destCard.caption:SetWidth(300)
+  destCard.caption:SetJustifyH("CENTER")
+  destCard.caption:SetText("|cffffd100" .. l("dest_card", "Destination") .. "|r")
+  destCard.name = destCard:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+  destCard.name:SetPoint("TOPLEFT", destCard, "TOPLEFT", 10, -28)
+  destCard.name:SetWidth(280)
+  destCard.name:SetJustifyH("CENTER")
+  destCard.sub = destCard:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  destCard.sub:SetPoint("TOPLEFT", destCard, "TOPLEFT", 10, -48)
+  destCard.sub:SetWidth(280)
+  destCard.sub:SetJustifyH("CENTER")
+  destCard.count = destCard:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  destCard.count:SetPoint("TOPRIGHT", destCard, "TOPRIGHT", -8, -6)
+  destCard:Hide()
+  return destCard
+end
+
+local function ShowDestCard(name, sub, secs)
+  if MDB().destCard == false then return end
+  if not (name and name ~= "") then return end
+  local card = EnsureDestCard()
+  if not card then return end
+  card.name:SetText(name)
+  card.sub:SetText(sub and Util.Trunc(sub, 60) or "")
+  card:ClearAllPoints()
+  card:SetPoint("TOP", UIParent, "TOP", 0, bannerFrame and -214 or -140)
+  card:Show()
+  if destTicker then destTicker:Cancel() end
+  local left = secs or 120
+  card.count:SetText(CardTime(left))
+  destTicker = C_Timer.NewTicker(1, function()
+    left = left - 1
+    if left <= 0 or not card:IsShown() then
+      if destTicker then destTicker:Cancel() end
+      destTicker = nil
+      card:Hide()
+      return
+    end
+    card.count:SetText(CardTime(left))
+  end)
+end
+
+function NS.ShowBanner(title, sub, dest)
   local db = MDB()
   if db.banner == false then return end
   BuildBanner()
@@ -93,6 +165,7 @@ function NS.ShowBanner(title, sub)
   bannerFrame.sub:SetText(tostring(sub or ""))
   bannerFrame:SetAlpha(1)
   bannerFrame:Show()
+  ShowDestCard(dest or sub, sub, tonumber(db.bannerSeconds) or 120)
   if bannerTimer then bannerTimer:Cancel() end
   local secs = tonumber(db.bannerSeconds) or 120
   bannerTimer = C_Timer.NewTimer(secs, function()
@@ -114,7 +187,8 @@ local function QueuePop(title, sub)
   if db.flash ~= false and FlashClientIcon then
     pcall(FlashClientIcon)
   end
-  NS.ShowBanner(title, sub)
+  -- sub doubles as the destination for the popup card.
+  NS.ShowBanner(title, sub, sub)
 end
 
 -- ---------------------------------------------------------------------------
@@ -155,6 +229,35 @@ local function FormatElapsed(secs)
   return string.format("%d:%02d", math.floor(secs / 60), secs % 60)
 end
 
+-- ---------------------------------------------------------------------------
+-- Queue-time history -> "how long will this take" estimates
+-- ---------------------------------------------------------------------------
+
+local function RecordQueueTime(cat, secs)
+  if not (type(cat) == "string" and type(secs) == "number" and secs > 5 and secs < 86400) then return end
+  local db = MDB()
+  db.history = db.history or {}
+  local h = db.history[cat] or {}
+  h[#h + 1] = math.floor(secs)
+  while #h > 20 do table.remove(h, 1) end
+  db.history[cat] = h
+end
+
+local function AverageQueueTime(cat)
+  local h = cat and MDB().history and MDB().history[cat]
+  if type(h) ~= "table" or #h == 0 then return nil end
+  local sum = 0
+  for _, v in ipairs(h) do sum = sum + (tonumber(v) or 0) end
+  if sum <= 0 then return nil end
+  return sum / #h
+end
+
+local function EstimateSuffix(cat)
+  local avg = AverageQueueTime(cat)
+  if not avg then return "" end
+  return "  |cff888888~" .. FormatElapsed(avg) .. "|r"
+end
+
 local function UpdateTimer()
   if not timerFrame then return end
   local db = MDB()
@@ -162,9 +265,11 @@ local function UpdateTimer()
   if qStart then
     text = string.format("|cffffd100%s|r %s", l("timer_queue", "Queue:"), FormatElapsed(GetTime() - qStart))
     if qLabel then text = text .. "  |cffcccccc" .. qLabel .. "|r" end
+    text = text .. EstimateSuffix(qLabel)
   elseif bgWait then
     text = string.format("|cffffd100%s|r %s", l("timer_bg", "BG queue:"), FormatElapsed(bgWait))
     if bgLabel then text = text .. "  |cffcccccc" .. bgLabel .. "|r" end
+    text = text .. EstimateSuffix("BG")
   end
   if text and db.showTimer ~= false then
     timerFrame.text:SetText(text)
@@ -218,15 +323,23 @@ end
 -- Joined-group detection (premade side)
 -- ---------------------------------------------------------------------------
 
+local function BannerSubtitle(app)
+  local sub = app.name or "?"
+  if app.comment and app.comment ~= "" then
+    sub = sub .. "\n|cffcccccc" .. Util.Trunc(app.comment, 80) .. "|r"
+  end
+  if app.leader and app.leader ~= "" then
+    sub = sub .. "\n|cffcccccc" .. string.format(l("leader_fmt", "leader: %s"),
+      Util.ShortName(app.leader)) .. "|r"
+  end
+  return sub
+end
+
 local function BannerForApplication(resultID)
   local app = NS.AppliedListings and NS.AppliedListings[resultID]
   if app and not app.announced then
     app.announced = true
-    local sub = app.name or "?"
-    if app.leader and app.leader ~= "" then
-      sub = sub .. "  |cffcccccc" .. string.format(l("leader_fmt", "leader: %s"), Util.ShortName(app.leader)) .. "|r"
-    end
-    NS.ShowBanner(l("banner_joined", "Joined group"), sub)
+    NS.ShowBanner(l("banner_joined", "Joined group"), BannerSubtitle(app), app.name)
     return true
   end
   return false
@@ -243,12 +356,36 @@ local function BannerForRecentApplication()
   end
   if best then
     best.announced = true
-    local sub = best.name or "?"
-    if best.leader and best.leader ~= "" then
-      sub = sub .. "  |cffcccccc" .. string.format(l("leader_fmt", "leader: %s"), Util.ShortName(best.leader)) .. "|r"
-    end
-    NS.ShowBanner(l("banner_joined", "Joined group"), sub)
+    NS.ShowBanner(l("banner_joined", "Joined group"), BannerSubtitle(best), best.name)
   end
+end
+
+-- ---------------------------------------------------------------------------
+-- Role-check popup QoL: pre-tick remembered roles (captured by the Browser
+-- module on every signup) when the LFD role-check dialog opens. Field names
+-- probed defensively - a Blizzard rename means "no pre-tick", never an error.
+-- ---------------------------------------------------------------------------
+
+local roleCheckHooked = false
+local function InitRoleCheckHook()
+  if roleCheckHooked then return end
+  if type(LFDRoleCheckPopup) ~= "table" or type(LFDRoleCheckPopup.HookScript) ~= "function" then return end
+  local ok = pcall(LFDRoleCheckPopup.HookScript, LFDRoleCheckPopup, "OnShow", function(self)
+    pcall(function()
+      local bdb = NS.db and NS.db.browser
+      local roles = (bdb and bdb.rememberRoles ~= false) and bdb.roles or nil
+      if not roles or not (roles.tank or roles.healer or roles.dps) then return end
+      local boxes = {
+        { self.RoleCheckButton1 and self.RoleCheckButton1.checkButton, roles.tank },
+        { self.RoleCheckButton2 and self.RoleCheckButton2.checkButton, roles.healer },
+        { self.RoleCheckButton3 and self.RoleCheckButton3.checkButton, roles.dps },
+      }
+      for _, s in ipairs(boxes) do
+        if s[1] and s[1].SetChecked then s[1]:SetChecked(s[2] and true or false) end
+      end
+    end)
+  end)
+  if ok then roleCheckHooked = true end
 end
 
 -- ---------------------------------------------------------------------------
@@ -283,19 +420,35 @@ local M = {
   end,
   OnEvent = function(_, event, ...)
     local arg1 = ...
+    InitRoleCheckHook() -- LFD UI is load-on-demand; cheap + idempotent
     if event == "UPDATE_STATUS" or event == "UPDATE_BATTLEFIELD_STATUS" then
       -- Battleground "confirm" = queue popped.
       if event == "UPDATE_BATTLEFIELD_STATUS" then
         local ok, status, mapName = pcall(GetBattlefieldStatus, arg1 or 1)
         if ok and status == "confirm" then
+          if bgWait then RecordQueueTime("BG", bgWait) end
           QueuePop(l("banner_bg_ready", "Battleground ready"), mapName or "")
         end
       end
       EvaluateQueue()
     elseif event == "LFG_PROPOSAL_SHOW" then
+      if qStart and qLabel then RecordQueueTime(qLabel, GetTime() - qStart) end
       local okP, p = pcall(GetLFGProposal)
       local name = (okP and type(p) == "table" and p.name) or nil
-      QueuePop(l("banner_pop", "Queue popped"), name or l("banner_pop_dungeon", "Your dungeon group is ready"))
+      -- Dungeon description for the banner card (LFGGetDungeonInfo shapes
+      -- vary; every field probed, missing text just falls back to the name).
+      local desc
+      if okP and type(p) == "table" and p.id and LFGGetDungeonInfo then
+        local okD, di = pcall(LFGGetDungeonInfo, p.id)
+        if okD and type(di) == "table" then
+          desc = di.description or di.desc or di.shortDescription or di.recap
+        end
+      end
+      local sub = name or l("banner_pop_dungeon", "Your dungeon group is ready")
+      if desc and desc ~= "" then
+        sub = sub .. "\n|cffcccccc" .. Util.Trunc(desc, 90) .. "|r"
+      end
+      QueuePop(l("banner_pop", "Queue popped"), sub)
       local db = MDB()
       if db.autoAccept and not (InCombatLockdown and InCombatLockdown()) and AcceptProposal then
         C_Timer.After(1, function() pcall(AcceptProposal) end)
@@ -325,6 +478,9 @@ local M = {
     ctx.AddCB(l("opt_banner", "Show 'what did I queue for' banner"),
       function() return MDB().banner ~= false end,
       function(v) MDB().banner = v end)
+    ctx.AddCB(l("opt_destcard", "Show the destination card with the banner (dungeon name + description)"),
+      function() return MDB().destCard ~= false end,
+      function(v) MDB().destCard = v end)
     ctx.AddCB(l("opt_showtimer", "Show queue timer frame while queued"),
       function() return MDB().showTimer ~= false end,
       function(v) MDB().showTimer = v; UpdateTimer() end)

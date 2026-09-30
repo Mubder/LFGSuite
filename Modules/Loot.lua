@@ -11,8 +11,9 @@
 --       (Encounter Journal probes - shows a clear "unavailable" note if this
 --       client's journal API shape differs; never errors)
 --   [x] Click a browser row to cycle its favorite tier
---   [ ] Class/spec/slot filters (needs tooltip item-class scanning)
---   [ ] Loot spec advisor on zone-in
+--   [x] Filters: "my spec" (GetItemSpecInfo-tagged items) + slot cycle
+--   [x] Loot-spec advisor: entering a keystone lists which of your
+--       favorites drop in this dungeon
 --   [ ] Catalyst / Great Vault eligible browser
 --   [ ] Dungeon teleport buttons (needs the spell table)
 
@@ -26,9 +27,57 @@ local LOOT_DEFAULTS = {
   dropNotify = true,
   favorites = {}, -- [charFullName] = { [tostring(itemID)] = tier }
   lastDungeon = nil, -- selected mapID in the browser
+  filterClass = false, -- only items flagged for my current spec
+  filterSlot = nil, -- equipLoc key ("INVTYPE_HEAD"...) or nil = all
 }
 
 local function MDB() return NS.EnsureModuleDB("loot", LOOT_DEFAULTS) end
+
+local SLOT_CYCLE = {
+  nil,
+  "INVTYPE_HEAD", "INVTYPE_NECK", "INVTYPE_SHOULDER", "INVTYPE_CLOAK",
+  "INVTYPE_CHEST", "INVTYPE_WRIST", "INVTYPE_HAND", "INVTYPE_WAIST",
+  "INVTYPE_LEGS", "INVTYPE_FEET", "INVTYPE_FINGER", "INVTYPE_TRINKET",
+  "INVTYPE_WEAPON", "INVTYPE_2HWEAPON", "INVTYPE_RANGED",
+}
+local SLOT_LABEL = {
+  INVTYPE_HEAD = "Head", INVTYPE_NECK = "Neck", INVTYPE_SHOULDER = "Shoulder",
+  INVTYPE_CLOAK = "Back", INVTYPE_CHEST = "Chest", INVTYPE_WRIST = "Wrist",
+  INVTYPE_HAND = "Hands", INVTYPE_WAIST = "Waist", INVTYPE_LEGS = "Legs",
+  INVTYPE_FEET = "Feet", INVTYPE_FINGER = "Ring", INVTYPE_TRINKET = "Trinket",
+  INVTYPE_WEAPON = "Wpn 1H", INVTYPE_2HWEAPON = "Wpn 2H", INVTYPE_RANGED = "Ranged",
+}
+
+local function MySpecID()
+  if not (GetSpecialization and GetSpecializationInfo) then return nil end
+  local ok, _, specID = pcall(GetSpecializationInfo, GetSpecialization())
+  if ok and type(specID) == "number" then return specID end
+  return nil
+end
+
+-- Retail tags dungeon loot with the specs it is intended for. Unknown data
+-- never hides an item (same rule as everywhere else in this addon).
+local function ItemForMySpec(item)
+  local mySpec = MySpecID()
+  if not mySpec then return true end
+  local probe = _G.GetItemSpecInfo or (C_Item and C_Item.GetItemSpecInfo)
+  if type(probe) ~= "function" then return true end
+  local ok, specs = pcall(probe, item.link or item.itemID)
+  if not (ok and type(specs) == "table" and #specs > 0) then return true end
+  for _, s in ipairs(specs) do
+    if s == mySpec then return true end
+  end
+  return false
+end
+
+local function ItemPassesFilters(item)
+  local db = MDB()
+  if db.filterClass and not ItemForMySpec(item) then return false end
+  if db.filterSlot and db.filterSlot ~= "" and item.slot ~= db.filterSlot then
+    return false
+  end
+  return true
+end
 
 local TIER_LABEL = {
   [1] = l("tier1", "nice"),
@@ -265,11 +314,19 @@ function NS.RefreshLootUI()
 
   local data = BuildJournalData(mapID)
   local favs = FavTable()
-  FauxScrollFrame_Update(scroll, #data.items, ROWS_VISIBLE, ROW_H)
+  -- Filters (class/spec + slot) apply at render time over the cached items.
+  local items = data.items
+  if (MDB().filterClass or MDB().filterSlot) then
+    items = {}
+    for _, it in ipairs(data.items) do
+      if ItemPassesFilters(it) then items[#items + 1] = it end
+    end
+  end
+  FauxScrollFrame_Update(scroll, #items, ROWS_VISIBLE, ROW_H)
   local offset = FauxScrollFrame_GetOffset(scroll)
   for i = 1, ROWS_VISIBLE do
     local row = rows[i]
-    local item = data.items[offset + i]
+    local item = items[offset + i]
     if item then
       local tier = favs[item.itemID]
       row.fav:SetText(tier and ("|cffffd100★|r " .. (TIER_LABEL[tier] or "?")) or "|cff666666☆|r")
@@ -284,9 +341,13 @@ function NS.RefreshLootUI()
       row:Hide()
     end
   end
-  frame.empty:SetShown(#data.items == 0)
-  if #data.items == 0 then
-    frame.empty:SetText(data.err or l("loot_none", "No items found."))
+  frame.empty:SetShown(#items == 0)
+  if #items == 0 then
+    if #data.items > 0 then
+      frame.empty:SetText(l("loot_filtered", "All items filtered out - loosen the class/slot filters."))
+    else
+      frame.empty:SetText(data.err or l("loot_none", "No items found."))
+    end
   end
 end
 
@@ -338,6 +399,40 @@ local function BuildUI()
   local hint = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   hint:SetPoint("LEFT", frame.dungeonBtn, "RIGHT", 10, 0)
   hint:SetText("|cff888888" .. l("loot_hint", "Click a row to cycle its favorite tier") .. "|r")
+
+  -- Filter controls (top-right of the header row).
+  local function PaintFilters()
+    local db = MDB()
+    frame.classBtn:SetText(db.filterClass
+      and ("|cff43d9ff" .. l("loot_f_class_mine", "My spec") .. "|r")
+      or l("loot_f_class_all", "All specs"))
+    local slotLbl = db.filterSlot and (SLOT_LABEL[db.filterSlot] or db.filterSlot)
+      or l("loot_f_all", "All")
+    frame.slotBtn:SetText(l("loot_f_slot_fmt", "Slot: %s"):format(slotLbl))
+  end
+  frame.classBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+  frame.classBtn:SetSize(96, 22)
+  frame.classBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -110, -40)
+  frame.classBtn:SetScript("OnClick", function()
+    local db = MDB()
+    db.filterClass = not db.filterClass or nil
+    PaintFilters()
+    NS.RefreshLootUI()
+  end)
+  frame.slotBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+  frame.slotBtn:SetSize(110, 22)
+  frame.slotBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -14, -40)
+  frame.slotBtn:SetScript("OnClick", function()
+    local db = MDB()
+    local cur = 1
+    for i, s in ipairs(SLOT_CYCLE) do
+      if s == db.filterSlot then cur = i break end
+    end
+    db.filterSlot = SLOT_CYCLE[(cur % #SLOT_CYCLE) + 1]
+    PaintFilters()
+    NS.RefreshLootUI()
+  end)
+  PaintFilters()
 
   local hy = -70
   local function Header(text, x, w)
@@ -404,6 +499,32 @@ function NS.ToggleLootWindow(state)
 end
 
 -- ---------------------------------------------------------------------------
+-- Loot-spec advisor: on entering a keystone dungeon, list which of this
+-- character's favorited items drop here, so the loot-spec choice is informed.
+-- ---------------------------------------------------------------------------
+
+local function AdviseForCurrentDungeon()
+  if not (C_ChallengeMode and C_ChallengeMode.GetActiveChallengeMapID) then return end
+  local ok, mapID = pcall(C_ChallengeMode.GetActiveChallengeMapID)
+  if not (ok and mapID) then return end
+  local favs = FavTable()
+  local data = BuildJournalData(mapID)
+  local hits = {}
+  for _, item in ipairs(data.items) do
+    if favs[item.itemID] then hits[#hits + 1] = item end
+  end
+  if #hits > 0 then
+    local names = {}
+    for i, item in ipairs(hits) do
+      if i > 4 then names[#names + 1] = "…" break end
+      names[#names + 1] = (item.link or item.name)
+    end
+    NS.Print("|cffffd100" .. (l("advisor_fmt", "Loot spec advisor - %d of your favorites drop here: %s")
+      :format(#hits, table.concat(names, ", "))) .. "|r")
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- Module
 -- ---------------------------------------------------------------------------
 
@@ -414,7 +535,7 @@ local M = {
   phase = 4,
   status = "alpha",
   defaultEnabled = true,
-  events = { "CHAT_MSG_LOOT" },
+  events = { "CHAT_MSG_LOOT", "CHALLENGE_MODE_START" },
   OnLoad = function() MDB() end,
   OnEnable = function() MDB() end,
   OnEvent = function(_, event, ...)
@@ -423,6 +544,11 @@ local M = {
       if type(msg) == "string" then
         HandleLootChat(msg, tostring(sender or ""))
       end
+    elseif event == "CHALLENGE_MODE_START" then
+      C_Timer.After(3, function()
+        local ok, err = pcall(AdviseForCurrentDungeon)
+        if not ok and NS.ModuleError then NS.ModuleError({ key = "loot" }, err) end
+      end)
     end
   end,
   OnOptions = function(ctx)

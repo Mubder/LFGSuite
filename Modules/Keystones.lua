@@ -13,9 +13,14 @@
 --   [x] Lindormi panel: auto-open the key window at the keystone NPC
 --   [x] Announce own key to party/guild (/lfgs keys announce)
 --   [x] Auto-insert keystone at the pedestal (default OFF + /lfgs keys insert)
---   [ ] Party reroll advisor (needs party keys from other LFG Suite users)
---   [ ] Improved keystone chat-link rendering in chat frames
---   [ ] Listen-only interop with Astral Keys / Angry Keystones / LibOpenRaid
+--   [x] Reroll advisor: /lfgs keys reroll (timed +1/+2/+3, new random
+--       dungeon; untimed -1) for self + synced party keys, plus an
+--       automatic notice when your own key changes after a run
+--   [x] Improved keystone chat-link rendering ("The Necrotic Wake +7",
+--       clickable) + announce sends the real keystone link
+--   [x] Listen-only interop with LibOpenRaid (LRS/LRS_LOGGED keystone
+--       broadcasts feed the party/guild registry); Astral Keys / Angry
+--       Keystones intentionally not sniffed (ARR sources - not read)
 
 LFGSuite = LFGSuite or {}
 local NS = LFGSuite
@@ -209,7 +214,7 @@ local function FindKeystoneInBags()
       for slot = 1, math.min(slots, 64) do
         local okL, link = pcall(C_Container.GetContainerItemLink, bag, slot)
         if okL and type(link) == "string" and link:find("|Hkeystone:", 1, true) then
-          return bag, slot
+          return bag, slot, link
         end
       end
     end
@@ -265,6 +270,134 @@ local function InitTooltipHook()
     if aff then pcall(tooltip.AddLine, tooltip, aff) end
   end)
   tooltipHooked = ok
+end
+
+-- ---------------------------------------------------------------------------
+-- Keystone chat-link beautifier: "[Keystone: The Necrotic Wake (Level 7)]"
+-- -> "The Necrotic Wake +7" (the hyperlink stays clickable). The label text
+-- is the primary name source (always carries the dungeon name); the link
+-- payload's level wins when parseable.
+-- ---------------------------------------------------------------------------
+
+local function BeautifyKeystoneLinks(msg)
+  if type(msg) ~= "string" or not msg:find("|Hkeystone:", 1, true) then return msg end
+  return (msg:gsub("(|Hkeystone:[^|]*)|h%[([^%]]*)%]|h", function(h, label)
+    local level
+    local payload = h:match("|Hkeystone:(.-)$")
+    if payload then
+      local _, _, lvlStr = strsplit(":", payload)
+      level = tonumber(lvlStr)
+    end
+    if not level then level = tonumber(label:match("%(Level%s*(%d+)%)")) end
+    local name = label:match("^Keystone:%s*(.+)%s*%(.-%)$") or label
+    if not (level and level >= 2 and level <= 40) then
+      return h .. "|h[" .. label .. "]|h"
+    end
+    return h .. "|h[" .. name .. " |cffffd100+" .. level .. "|r]|h"
+  end))
+end
+
+local chatLinkFiltered = false
+local function InitChatLinkFilter()
+  if chatLinkFiltered then return end
+  if not ChatFrame_AddMessageEventFilter then return end
+  local events = {
+    "CHAT_MSG_SAY", "CHAT_MSG_YELL",
+    "CHAT_MSG_PARTY", "CHAT_MSG_PARTY_LEADER",
+    "CHAT_MSG_RAID", "CHAT_MSG_RAID_LEADER",
+    "CHAT_MSG_GUILD", "CHAT_MSG_OFFICER",
+    "CHAT_MSG_WHISPER", "CHAT_MSG_WHISPER_INFORM",
+    "CHAT_MSG_CHANNEL",
+  }
+  for _, ev in ipairs(events) do
+    pcall(ChatFrame_AddMessageEventFilter, ev, function(_, _, msg, ...)
+      local fixed = BeautifyKeystoneLinks(msg)
+      if fixed ~= msg then return false, fixed end
+      return false
+    end)
+  end
+  chatLinkFiltered = true
+end
+
+-- ---------------------------------------------------------------------------
+-- Reroll advisor (Midnight rules: timed = +1/+2/+3 by time remaining, key
+-- moves to a random dungeon from the season pool; untimed = -1)
+-- ---------------------------------------------------------------------------
+
+local function RerollAdvisor()
+  RefreshOwn()
+  local n = 0
+  local function advise(name, level, mapID, class, isMe)
+    local dname = Util.GetChallengeMapName(mapID) or "?"
+    local who = isMe and ("|cffffd100" .. l("you", "You") .. "|r")
+      or Util.ClassColorize(class, Util.ShortName(name))
+    NS.Print(string.format("%s: |cffffd100+%d %s|r |cff888888→|r |cff43ff43+%d/%d/%d|r |cff888888"
+      .. l("reroll_newdungeon", "new dungeon") .. " · |r" .. l("reroll_un", "untimed") .. " |cffee6666+%d|r",
+      who, level, dname, level + 1, level + 2, level + 3, level - 1))
+    n = n + 1
+  end
+  if ownLevel then
+    advise(MyFullName(), ownLevel, ownMapID, select(2, UnitClass("player")), true)
+  end
+  for name, e in pairs(party) do advise(name, e.level, e.mapID, e.class) end
+  if n == 0 then
+    NS.Print(l("reroll_nodata", "No keystones known yet (own key not detected, no synced party keys)."))
+  else
+    NS.Print("|cff888888" .. l("reroll_note",
+      "timed: +1/+2/+3 by time left, dungeon rerolls within the season pool; untimed: -1") .. "|r")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Listen-only interop: LibOpenRaid keystone broadcasts (MIT; wire format
+-- read from the public source per PLAN). Prefixes "LRS"/"LRS_LOGGED";
+-- "K,level,mapID,challengeMapID,classID,rating,mythicPlusMapID,specID" is a
+-- keystone, "J" a request. We never speak their protocol back - pure
+-- listening, and anything that doesn't parse is silently dropped. (Astral
+-- Keys / Angry Keystones stay un-listened: ARR sources are not read.)
+-- ---------------------------------------------------------------------------
+
+local INTEROP_PREFIXES = { "LRS", "LRS_LOGGED" }
+local interopRegistered = false
+
+local function InitInteropListeners()
+  if interopRegistered then return end
+  if not (C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix) then return end
+  local any = false
+  for _, p in ipairs(INTEROP_PREFIXES) do
+    if pcall(C_ChatInfo.RegisterAddonMessagePrefix, p) then any = true end
+  end
+  interopRegistered = any
+end
+
+local function OnInteropMessage(prefix, msg, channel, sender)
+  if type(msg) ~= "string" then return end
+  if msg:sub(1, 1) ~= "K" then return end -- keystone data only; "J" (request) ignored
+  local parts = { strsplit(",", msg:sub(2)) }
+  local level = tonumber(parts[1])
+  local mapID = tonumber(parts[2])
+  local challengeMapID = tonumber(parts[3])
+  local classID = tonumber(parts[4])
+  if not (level and level >= 2 and level <= 40) then return end
+  if not ((mapID or 0) > 0) then return end
+  -- challengeMapID is what C_ChallengeMode.GetMapUIInfo names correctly.
+  local useMap = (challengeMapID and challengeMapID > 0) and challengeMapID or mapID
+  local name = NormalizeSender(sender)
+  if not name then return end
+  local class
+  if classID and classID > 0 and GetClassInfo then
+    local okC, _, token = pcall(GetClassInfo, classID)
+    if okC and token then class = token end
+  end
+  local entry = { level = level, mapID = useMap, class = class, t = time() }
+  if channel == "GUILD" then
+    local db = MDB()
+    if db.guildSync == false then return end
+    db.guild[name] = entry
+  else
+    party[name] = entry
+  end
+  NS.RefreshKeysUI()
 end
 
 -- ---------------------------------------------------------------------------
@@ -476,12 +609,16 @@ end
 -- ---------------------------------------------------------------------------
 
 local function Announce(where)
+  RefreshOwn()
   if not ownLevel then
     NS.Print(l("announce_nokey", "No keystone to announce."))
     return
   end
-  local name = Util.GetChallengeMapName(ownMapID) or "?"
-  local msg = string.format("[LFG Suite] +%d %s", ownLevel, name)
+  -- Prefer the real clickable keystone link from bags: recipients get a
+  -- hoverable link (and our own chat beautifier renders it compactly here).
+  local _, _, link = FindKeystoneInBags()
+  local msg = link or string.format("[LFG Suite] +%d %s", ownLevel,
+    Util.GetChallengeMapName(ownMapID) or "?")
   if where == "guild" then
     pcall(SendChatMessage, msg, "GUILD")
   else
@@ -508,12 +645,16 @@ local M = {
     MDB()
     BuildUI()
     InitTooltipHook()
+    InitChatLinkFilter()
+    InitInteropListeners()
     EnsureReceptacleHook()
   end,
   OnEnable = function()
     MDB()
     BuildUI()
     InitTooltipHook()
+    InitChatLinkFilter()
+    InitInteropListeners()
     EnsureReceptacleHook()
   end,
   OnDisable = function()
@@ -537,8 +678,20 @@ local M = {
         GuildBroadcast()
       end)
     elseif event == "CHALLENGE_MODE_COMPLETED" then
+      local prevLvl, prevMap = ownLevel, ownMapID
       C_Timer.After(3, function()
         if RefreshOwn() then
+          if ownLevel then
+            local n = Util.GetChallengeMapName(ownMapID) or "?"
+            if prevLvl then
+              local p = Util.GetChallengeMapName(prevMap) or "?"
+              NS.Print("|cffffd100" .. (l("reroll_fmt", "Keystone updated: +%d %s → +%d %s")
+                :format(prevLvl, p, ownLevel, n)) .. "|r")
+            else
+              NS.Print("|cffffd100" .. (l("reroll_newkey_fmt", "New keystone: +%d %s")
+                :format(ownLevel, n)) .. "|r")
+            end
+          end
           RecordAlt()
           GuildBroadcast()
           SendOwn(PartyChannel())
@@ -547,7 +700,10 @@ local M = {
       end)
     elseif event == "CHAT_MSG_ADDON" then
       -- payload: prefix, message, channel, sender
-      NS.Comms.OnMessage(...)
+      local prefix, msg, channel, sender = ...
+      if not NS.Comms.OnMessage(prefix, msg, channel, sender) then
+        OnInteropMessage(prefix, msg, channel, sender)
+      end
     elseif event == "GROUP_ROSTER_UPDATE" then
       PruneParty()
       NS.RefreshKeysUI()
@@ -597,6 +753,8 @@ NS.SlashHandlers.keys = function(rest)
     Announce("party")
   elseif rest == "announce guild" then
     Announce("guild")
+  elseif rest == "reroll" then
+    RerollAdvisor()
   elseif rest == "insert" then
     InsertKeystone()
   elseif rest == "sort" then
